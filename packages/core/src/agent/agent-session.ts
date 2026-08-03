@@ -41,6 +41,7 @@ import {
   createResearchWebTool,
   createIngestMaterialTool,
   createRetrieveMaterialTool,
+  createManageBookReferenceTool,
   createImportChaptersTool,
 } from "./agent-tools.js";
 import { createFilmAuthoringTools, filmLLMDepsFromClient } from "./film-authoring-tools.js";
@@ -956,6 +957,7 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
     researchTool,
     materialTool,
     materialRetrievalTool,
+    createManageBookReferenceTool(params.projectRoot, params.bookId),
     importChaptersTool,
     createNarrativeForecastCreateTool(params.pipeline, params.bookId, params.projectRoot),
     createNarrativeForecastGetTool(params.bookId, params.projectRoot),

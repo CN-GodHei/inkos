@@ -54,6 +54,7 @@ import { persistChapterArtifacts } from "./chapter-persistence.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
+import { selectBookReferenceContext } from "../references/reference-context.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -3730,6 +3731,12 @@ ${matrix}`,
       plan,
       contextBudget: contextBudgetFromClient(composerCtx.client),
       compressibleContextCompiler: (request) => composer.compileCompressibleContext(request),
+      referenceContextProvider: (request) => selectBookReferenceContext(
+        this.config.projectRoot,
+        book.id,
+        request,
+        (selectionRequest) => composer.selectReferenceSections(selectionRequest),
+      ),
       onContextCompression: this.config.onContextCompression,
     });
 

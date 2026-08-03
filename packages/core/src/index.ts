@@ -175,7 +175,28 @@ export {
   composeGovernedChapter,
   type ComposeChapterInput,
   type ComposeChapterOutput,
+  type BookReferenceContextProvider,
 } from "./agents/composer.js";
+export {
+  bindBookReference,
+  listBookReferences,
+  loadBookReferenceManifest,
+  loadMaterialAsset,
+  unbindBookReference,
+  type BindBookReferenceInput,
+  type BookReferenceBinding,
+  type BookReferenceList,
+  type BookReferenceManifest,
+  type ResolvedBookReference,
+} from "./references/book-references.js";
+export {
+  selectBookReferenceContext,
+  type BookReferenceContextSelection,
+  type BookReferenceSelectionTask,
+  type ReferenceSectionCandidate,
+  type ReferenceSectionSelectionRequest,
+  type ReferenceSectionSelector,
+} from "./references/reference-context.js";
 export {
   PLANNER_MEMO_SYSTEM_PROMPT,
   PLANNER_MEMO_USER_TEMPLATE,
