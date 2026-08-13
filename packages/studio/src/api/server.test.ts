@@ -13,6 +13,7 @@ const repairChapterStateMock = vi.fn();
 const reviseFoundationMock = vi.fn();
 const initSpinoffBookMock = vi.fn();
 const initImitationBookMock = vi.fn();
+const importFanficCanonMock = vi.fn();
 const consolidateMock = vi.fn();
 const evaluateBookQualityMock = vi.fn();
 const reviseDraftMock = vi.fn();
@@ -221,6 +222,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     reviseFoundation = reviseFoundationMock;
     initSpinoffBook = initSpinoffBookMock;
     initImitationBook = initImitationBookMock;
+    importFanficCanon = importFanficCanonMock;
     reviseDraft = reviseDraftMock;
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     writeNextChapter = writeNextChapterMock;
@@ -272,6 +274,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     normalizePlatformOrOther: actual.normalizePlatformOrOther,
     defaultChapterLength: actual.defaultChapterLength,
     inferLanguage: actual.inferLanguage,
+    ingestMaterial: actual.ingestMaterial,
     isUsablePlayInitialScene: actual.isUsablePlayInitialScene,
     chatCompletion: chatCompletionMock,
     loadProjectConfig: loadProjectConfigMock,
@@ -423,6 +426,8 @@ describe("createStudioServer daemon lifecycle", () => {
     reviseFoundationMock.mockReset();
     initSpinoffBookMock.mockReset();
     initImitationBookMock.mockReset();
+    importFanficCanonMock.mockReset();
+    importFanficCanonMock.mockResolvedValue("# Imported Canon");
     consolidateMock.mockReset();
     evaluateBookQualityMock.mockReset();
     reviseDraftMock.mockReset();
@@ -1100,6 +1105,25 @@ describe("createStudioServer daemon lifecycle", () => {
     ]);
   });
 
+  it("merges persisted discovered/user models ahead of the static fallback catalog", async () => {
+    await writeFile(join(root, "inkos.json"), JSON.stringify({
+      ...projectConfig,
+      llm: {
+        ...projectConfig.llm,
+        services: [{ service: "moonshot", models: ["moonshot-model", "kimi-k3-preview"] }],
+      },
+    }, null, 2), "utf-8");
+    loadSecretsMock.mockResolvedValue({ services: { moonshot: { apiKey: "sk-moonshot" } } });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const response = await app.request("http://localhost/api/v1/services/models");
+    const body = await response.json() as { groups: Array<{ service: string; models: Array<{ id: string }> }> };
+
+    expect(body.groups.find((group) => group.service === "moonshot")?.models.map((model) => model.id))
+      .toEqual(["moonshot-model", "kimi-k3-preview"]);
+  });
+
   it("filters non-text models out of connected bank model groups", async () => {
     loadSecretsMock.mockResolvedValue({
       services: {
@@ -1284,7 +1308,7 @@ describe("createStudioServer daemon lifecycle", () => {
       ...projectConfig,
       llm: {
         services: [
-          { service: "moonshot", temperature: 1, apiFormat: "chat", stream: true },
+          { service: "moonshot", temperature: 1, apiFormat: "chat", stream: true, models: ["kimi-k3-preview"] },
           { service: "custom", name: "内网GPT", baseUrl: "https://llm.internal.corp/v1", temperature: 0.9, apiFormat: "responses", stream: false },
         ],
         defaultModel: "kimi-k2.5",
@@ -1312,7 +1336,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
     expect(raw.llm.services).toEqual([
-      { service: "moonshot", temperature: 0.5, apiFormat: "responses", stream: false },
+      { service: "moonshot", temperature: 0.5, apiFormat: "responses", stream: false, models: ["kimi-k3-preview"] },
       { service: "custom", name: "内网GPT", baseUrl: "https://llm.internal.corp/v1", temperature: 0.9, apiFormat: "responses", stream: false },
     ]);
   });
@@ -6251,6 +6275,39 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     await expect(reviseFoundationRes.json()).resolves.toMatchObject({ ok: true });
     expect(reviseFoundationMock).toHaveBeenCalledWith("demo-book", "make the protagonist colder");
+  });
+
+  it("uploads an external motherbook and imports its extracted text as canon", async () => {
+    loadBookConfigMock.mockResolvedValue({ id: "demo-book", fanficMode: "canon" });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const source = "# 第一章\n\n林舟在旧码头发现了母本中的关键规则。";
+
+    const upload = await app.request("http://localhost/api/v1/import/canon/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: "motherbook.md",
+        dataUrl: `data:text/markdown;base64,${Buffer.from(source).toString("base64")}`,
+      }),
+    });
+    expect(upload.status).toBe(200);
+    const uploaded = await upload.json() as { storedPath: string };
+
+    const imported = await app.request("http://localhost/api/v1/books/demo-book/import/canon-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filePath: uploaded.storedPath, filename: "motherbook.md" }),
+    });
+    expect(imported.status).toBe(200);
+    const body = await imported.json() as { material: { id: string; markdownPath: string } };
+    await expect(access(join(root, body.material.markdownPath))).resolves.toBeUndefined();
+    expect(importFanficCanonMock).toHaveBeenCalledWith(
+      "demo-book",
+      expect.stringContaining("林舟在旧码头发现了母本中的关键规则"),
+      "motherbook",
+      "canon",
+    );
   });
 
   it("spinoff/init validates input, 404s a missing parent, and otherwise runs initSpinoffBook", async () => {

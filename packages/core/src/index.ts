@@ -556,6 +556,7 @@ export {
   type ChapterVersion,
   type ChapterVersionSource,
 } from "./state/chapter-workspace.js";
+export { loadChaptersFromPath, compareChapterSourceNames } from "./agent/chapter-import-source.js";
 export { bootstrapStructuredStateFromMarkdown } from "./state/state-bootstrap.js";
 export { renderCurrentStateProjection, renderHooksProjection, renderChapterSummariesProjection } from "./state/state-projections.js";
 export { applyRuntimeStateDelta, type RuntimeStateSnapshot } from "./state/state-reducer.js";
@@ -699,3 +700,4 @@ export {
 } from "./interactive-film/emotion.js";
 export { exportInk } from "./interactive-film/export-ink.js";
 export { buildPlayableHtml } from "./interactive-film/export-html.js";
+export { ingestMaterial, type IngestMaterialInput, type MaterialAsset } from "./materials/ingest.js";
