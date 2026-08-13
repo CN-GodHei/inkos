@@ -15,7 +15,7 @@ import type {
   UserMessage,
 } from "@mariozechner/pi-ai";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import { assertWithinContextWindow, estimatePiContextTokens } from "../llm/provider.js";
+import { assertWithinContextWindow, estimatePiContextTokens, guardAssistantMessageStream } from "../llm/provider.js";
 import { buildAgentSystemPrompt } from "./agent-system-prompt.js";
 import {
   createPatchChapterTextTool,
@@ -369,10 +369,15 @@ function guardedStreamSimple<TApi extends Api>(
   const traceHeaders = agentTrajectoryHeaders(model.baseUrl, modelCall, 1, {
     effort: String(options?.reasoning ?? (model.reasoning ? "enabled" : "disabled")),
   });
-  return streamSimple(model, context, {
-    ...options,
-    headers: { ...(options?.headers ?? {}), ...traceHeaders },
-  });
+  return guardAssistantMessageStream(
+    model,
+    (signal) => streamSimple(model, context, {
+      ...options,
+      headers: { ...(options?.headers ?? {}), ...traceHeaders },
+      signal,
+    }),
+    options?.signal,
+  );
 }
 
 function localAssistantStopStream(model: Model<Api>): AssistantMessageEventStream {
