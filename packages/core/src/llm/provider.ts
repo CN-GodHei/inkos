@@ -16,6 +16,10 @@ import { fetchWithProxy } from "../utils/proxy-fetch.js";
 import { isApiKeyOptionalForEndpoint } from "../utils/llm-endpoint-auth.js";
 import { isLlmStubEnabled, stubChatCompletion } from "../agent/llm-stub.js";
 import { createLeadingThinkTagStripper, stripLeadingThinkBlock } from "./think-tag-stripper.js";
+import {
+  agentTrajectoryHeaders,
+  beginAgentModelCall,
+} from "./agent-trajectory.js";
 
 
 // === Streaming Monitor Types ===
@@ -591,7 +595,7 @@ function isRetryableLLMError(error: unknown): boolean {
 }
 
 async function withTransientLLMRetry<T>(
-  run: () => Promise<T>,
+  run: (attempt: number) => Promise<T>,
   options?: { readonly enabled?: boolean; readonly signal?: AbortSignal },
 ): Promise<T> {
   const enabled = options?.enabled ?? true;
@@ -599,7 +603,7 @@ async function withTransientLLMRetry<T>(
   for (let attempt = 0; attempt <= TRANSIENT_LLM_RETRIES; attempt++) {
     options?.signal?.throwIfAborted();
     try {
-      return await run();
+      return await run(attempt + 1);
     } catch (error) {
       lastError = error;
       if (
@@ -665,12 +669,13 @@ function shouldUseNativeLocalOpenAICompatibleTransport(client: LLMClient): boole
     });
 }
 
-function buildCustomHeaders(client: LLMClient): Record<string, string> {
+function buildCustomHeaders(client: LLMClient, traceHeaders: Record<string, string>): Record<string, string> {
   const apiKey = sanitizeHeaderApiKey(client._apiKey);
   return sanitizeHttpHeaders({
     "Content-Type": "application/json",
     ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     ...(client._piModel?.headers ?? {}),
+    ...traceHeaders,
   }) ?? { "Content-Type": "application/json" };
 }
 
@@ -864,6 +869,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
   signal?: AbortSignal,
+  traceHeaders: Record<string, string> = {},
 ): Promise<LLMResponse> {
   const baseUrl = client._piModel?.baseUrl ?? "";
   const errorCtx = { baseUrl, model, service: client.service };
@@ -889,6 +895,7 @@ async function chatCompletionViaCustomAnthropicCompatible(
       "Content-Type": "application/json",
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
       ...(client._piModel?.headers ?? {}),
+      ...traceHeaders,
     }) ?? { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     signal,
@@ -975,13 +982,14 @@ async function chatCompletionViaCustomOpenAICompatible(
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
   signal?: AbortSignal,
+  traceHeaders: Record<string, string> = {},
   allowSystemRoleFallback = true,
 ): Promise<LLMResponse> {
   if (client.provider === "anthropic") {
-    return chatCompletionViaCustomAnthropicCompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
+    return chatCompletionViaCustomAnthropicCompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal, traceHeaders);
   }
   const baseUrl = client._piModel?.baseUrl ?? "";
-  const headers = buildCustomHeaders(client);
+  const headers = buildCustomHeaders(client, traceHeaders);
   const errorCtx = { baseUrl, model, service: client.service };
   const extra = stripReservedKeys(resolved.extra);
 
@@ -1110,6 +1118,7 @@ async function chatCompletionViaCustomOpenAICompatible(
         onStreamProgress,
         onTextDelta,
         signal,
+        traceHeaders,
         false,
       );
     }
@@ -1239,11 +1248,18 @@ export async function chatCompletion(
   const onTextDelta = options?.onTextDelta;
   const signal = options?.signal;
   const errorCtx = { baseUrl: client._piModel?.baseUrl ?? "(unknown)", model, service: client.service };
+  const modelCall = beginAgentModelCall();
 
   try {
     return await withTransientLLMRetry(
-      async () => {
+      async (attempt) => {
         signal?.throwIfAborted();
+        const traceHeaders = agentTrajectoryHeaders(client._piModel?.baseUrl, modelCall, attempt, {
+          effort: client.defaults.thinkingBudget > 0 ? "enabled" : "disabled",
+          ...(client.defaults.thinkingBudget > 0
+            ? { budgetTokens: client.defaults.thinkingBudget }
+            : {}),
+        });
         assertWithinContextWindow({
           piModel: resolvePiModel(client, model),
           model,
@@ -1251,9 +1267,9 @@ export async function chatCompletion(
           reservedOutputTokens: resolved.maxTokens,
         });
         if (shouldUseNativeCustomTransport(client)) {
-          return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
+          return chatCompletionViaCustomOpenAICompatible(client, model, messages, resolved, onStreamProgress, onTextDelta, signal, traceHeaders);
         }
-        return chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta, signal);
+        return chatCompletionViaPiAi(client, model, messages, resolved, onStreamProgress, onTextDelta, signal, traceHeaders);
       },
       // Retrying after UI text deltas have been emitted can duplicate visible
       // text; callers can also opt out (e.g. fast-fail diagnostics).
@@ -1314,6 +1330,7 @@ async function chatCompletionViaPiAi(
   onStreamProgress?: OnStreamProgress,
   onTextDelta?: (text: string) => void,
   signal?: AbortSignal,
+  traceHeaders: Record<string, string> = {},
 ): Promise<LLMResponse> {
   const piModel = resolvePiModel(client, model);
   const context = toPiContext(messages);
@@ -1321,7 +1338,7 @@ async function chatCompletionViaPiAi(
     temperature: resolved.temperature,
     maxTokens: resolved.maxTokens,
     apiKey: client._apiKey,
-    headers: mergeUserAgent(piModel.headers),
+    headers: mergeUserAgent({ ...(piModel.headers ?? {}), ...traceHeaders }),
     signal,
   };
 

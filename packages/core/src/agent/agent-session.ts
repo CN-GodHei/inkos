@@ -73,6 +73,12 @@ import {
   createUseSkillTool,
   sanitizeSkillTurnMessage,
 } from "./skill-tool.js";
+import {
+  agentTrajectoryHeaders,
+  beginAgentModelCall,
+  opaqueConversationId,
+  runWithAgentTrajectory,
+} from "../llm/agent-trajectory.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -359,7 +365,14 @@ function guardedStreamSimple<TApi extends Api>(
     estimatedInputTokens: estimatePiContextTokens(context),
     reservedOutputTokens,
   });
-  return streamSimple(model, context, options);
+  const modelCall = beginAgentModelCall();
+  const traceHeaders = agentTrajectoryHeaders(model.baseUrl, modelCall, 1, {
+    effort: String(options?.reasoning ?? (model.reasoning ? "enabled" : "disabled")),
+  });
+  return streamSimple(model, context, {
+    ...options,
+    headers: { ...(options?.headers ?? {}), ...traceHeaders },
+  });
 }
 
 function localAssistantStopStream(model: Model<Api>): AssistantMessageEventStream {
@@ -1271,11 +1284,17 @@ async function runAgentSessionUnlocked(
   const turnMessageStartIndex = agent.state.messages.length;
 
   try {
-    if (promptImages.length > 0) {
-      await agent.prompt(promptMessage, promptImages);
-    } else {
-      await agent.prompt(promptMessage);
-    }
+    await runWithAgentTrajectory({
+      conversationId: opaqueConversationId(sessionId),
+      runId: requestId,
+      agentRole: "main",
+    }, async () => {
+      if (promptImages.length > 0) {
+        await agent.prompt(promptMessage, promptImages);
+      } else {
+        await agent.prompt(promptMessage);
+      }
+    });
 
     finalAssistant = lastAssistantMessage(agent.state.messages);
     agent.state.messages = agent.state.messages.map((message, index) => (

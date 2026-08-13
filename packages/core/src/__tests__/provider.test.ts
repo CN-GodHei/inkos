@@ -5,6 +5,7 @@ import {
   chatCompletion,
   type LLMClient,
 } from "../llm/provider.js";
+import { runWithAgentTrajectory } from "../llm/agent-trajectory.js";
 
 // ── Mock @mariozechner/pi-ai ──────────────────────────────────────────────────
 // We intercept streamSimple so tests don't hit the network.
@@ -420,6 +421,51 @@ describe("chatCompletion via pi-ai", () => {
     });
     expect(init.headers).not.toHaveProperty("X-Bad");
 
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps one model-call id while incrementing kkaiapi client retry attempts", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: "Unavailable",
+        headers: new Headers(),
+        text: async () => JSON.stringify({ error: { message: "temporary unavailable" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "recovered" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = makeClient(0.7, {
+      service: "kkaiapi",
+      stream: false,
+      _piModel: { ...MOCK_PI_MODEL, baseUrl: "https://api.kkaiapi.com/v1" },
+    });
+
+    const result = await runWithAgentTrajectory({
+      conversationId: "inkos-conv",
+      runId: "run-7",
+      agentRole: "workflow",
+    }, () => chatCompletion(client, "deepseek-v4-flash", [{ role: "user", content: "write" }]));
+
+    expect(result.content).toBe("recovered");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const first = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    const second = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>;
+    expect(first["X-InkOS-Model-Call-ID"]).toBeTruthy();
+    expect(second["X-InkOS-Model-Call-ID"]).toBe(first["X-InkOS-Model-Call-ID"]);
+    expect(first["X-InkOS-Client-Attempt"]).toBe("1");
+    expect(second["X-InkOS-Client-Attempt"]).toBe("2");
+    expect(second).toMatchObject({
+      "X-InkOS-Conversation-ID": "inkos-conv",
+      "X-InkOS-Run-ID": "run-7",
+      "X-InkOS-Agent-Role": "workflow",
+    });
     vi.unstubAllGlobals();
   });
 

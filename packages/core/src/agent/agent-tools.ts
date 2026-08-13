@@ -35,6 +35,10 @@ import {
 } from "../interaction/action-envelope.js";
 import { ResearchSearchConfigSchema } from "../models/project.js";
 import { searchWeb } from "../utils/web-search.js";
+import {
+  runAsWorkflowTrajectory,
+  runWithAgentTrajectoryRole,
+} from "../llm/agent-trajectory.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -661,9 +665,11 @@ function runPipelineWithAbortSignal<T>(
   const runner = pipeline as PipelineRunner & {
     runWithAbortSignal?: <R>(activeSignal: AbortSignal | undefined, activeTask: () => Promise<R>) => Promise<R>;
   };
-  return runner.runWithAbortSignal
-    ? runner.runWithAbortSignal(signal, task)
-    : task();
+  return runAsWorkflowTrajectory(() => (
+    runner.runWithAbortSignal
+      ? runner.runWithAbortSignal(signal, task)
+      : task()
+  ));
 }
 
 export function createSubAgentTool(
@@ -688,34 +694,35 @@ export function createSubAgentTool(
     parameters: options.architectCreateOnly ? ArchitectCreateSubAgentParams : SubAgentParams,
     prepareArguments: prepareSubAgentArguments,
     async execute(
-      _toolCallId: string,
+      toolCallId: string,
       params: SubAgentParamsType,
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<unknown>> {
-      const { agent, instruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, revise, feedback, mode, format, approvedOnly } = params;
+      return runWithAgentTrajectoryRole("subagent", async () => {
+        const { agent, instruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, revise, feedback, mode, format, approvedOnly } = params;
 
-      const progress = (msg: string) => {
-        onUpdate?.(textResult(msg));
-      };
+        const progress = (msg: string) => {
+          onUpdate?.(textResult(msg));
+        };
 
-      try {
-        if (options.architectCreateOnly && agent !== "architect") {
-          throw new Error("This confirmed book-creation turn can only run the architect. Open the created book or use the book session to write chapters.");
-        }
-        if (!activeBookId && agent !== "architect") {
-          return textResult("No active book. Only the architect agent can create a book from this session.");
-        }
-        if (activeBookId && agent === "architect" && !revise) {
-          return textResult(
-            sessionIsZh
-              ? "当前已有书籍，不需要建书。如果你想创建新书，请先回到首页。"
-              : "This session already has a book, so no new book is needed. To create a new book, go back to the home page first.",
-          );
-        }
+        try {
+          if (options.architectCreateOnly && agent !== "architect") {
+            throw new Error("This confirmed book-creation turn can only run the architect. Open the created book or use the book session to write chapters.");
+          }
+          if (!activeBookId && agent !== "architect") {
+            return textResult("No active book. Only the architect agent can create a book from this session.");
+          }
+          if (activeBookId && agent === "architect" && !revise) {
+            return textResult(
+              sessionIsZh
+                ? "当前已有书籍，不需要建书。如果你想创建新书，请先回到首页。"
+                : "This session already has a book, so no new book is needed. To create a new book, go back to the home page first.",
+            );
+          }
 
-        switch (agent) {
-          case "architect": {
+          switch (agent) {
+            case "architect": {
             const createBookPayload = options.actionPayload?.createBook;
             if (revise) {
               if (!activeBookId) {
@@ -927,30 +934,31 @@ export function createSubAgentTool(
             );
           }
 
-          default:
-            return textResult(`Unknown agent: ${agent}`);
+            default:
+              return textResult(`Unknown agent: ${agent}`);
+          }
+        } catch (err: any) {
+          if (agent === "architect" && err instanceof ArchitectIncompleteFoundationError) {
+            const missing = err.missing.join(", ");
+            return textResult(
+              [
+                err.message,
+                "",
+                `缺失 section: ${missing}`,
+                "我会把已生成的部分保留下来，并继续补齐缺失 section；不要重新发明一本书。",
+              ].join("\n"),
+              {
+                kind: "architect_incomplete",
+                missing: [...err.missing],
+                partialContent: err.partialContent,
+                retryInstruction: `Continue repairing the architect foundation. Preserve the partial content and fill missing sections: ${missing}.`,
+              },
+            );
+          }
+          console.error(`[sub_agent] "${agent}" failed:`, err);
+          throw err;
         }
-      } catch (err: any) {
-        if (agent === "architect" && err instanceof ArchitectIncompleteFoundationError) {
-          const missing = err.missing.join(", ");
-          return textResult(
-            [
-              err.message,
-              "",
-              `缺失 section: ${missing}`,
-              "我会把已生成的部分保留下来，并继续补齐缺失 section；不要重新发明一本书。",
-            ].join("\n"),
-            {
-              kind: "architect_incomplete",
-              missing: [...err.missing],
-              partialContent: err.partialContent,
-              retryInstruction: `Continue repairing the architect foundation. Preserve the partial content and fill missing sections: ${missing}.`,
-            },
-          );
-        }
-        console.error(`[sub_agent] "${agent}" failed:`, err);
-        throw err;
-      }
+      }, toolCallId);
     },
   };
 }
