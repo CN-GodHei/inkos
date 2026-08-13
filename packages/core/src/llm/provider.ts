@@ -41,6 +41,13 @@ const UNKNOWN_MODEL_FALLBACK_MAX_TOKENS = 8192 * 3;
 const TRANSIENT_LLM_RETRIES = 2;
 const DEFAULT_FIRST_STREAM_EVENT_TIMEOUT_MS = 120_000;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
+const DEFAULT_PIPELINE_FIRST_STREAM_EVENT_TIMEOUT_MS = 300_000;
+const DEFAULT_PIPELINE_STREAM_IDLE_TIMEOUT_MS = 180_000;
+
+export interface StreamDeadlineOptions {
+  readonly firstEventTimeoutMs?: number;
+  readonly idleTimeoutMs?: number;
+}
 
 export class LLMStreamInactivityError extends Error {
   constructor(
@@ -61,14 +68,21 @@ interface StreamActivityDeadline {
   readonly timeoutError: () => LLMStreamInactivityError | undefined;
 }
 
-function createStreamActivityDeadline(callerSignal?: AbortSignal): StreamActivityDeadline {
+function createStreamActivityDeadline(
+  callerSignal?: AbortSignal,
+  defaults: Required<StreamDeadlineOptions> = {
+    firstEventTimeoutMs: DEFAULT_FIRST_STREAM_EVENT_TIMEOUT_MS,
+    idleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  },
+  overrides?: StreamDeadlineOptions,
+): StreamActivityDeadline {
   const firstEventTimeoutMs = readPositiveTimeout(
     process.env.INKOS_LLM_FIRST_EVENT_TIMEOUT_MS,
-    DEFAULT_FIRST_STREAM_EVENT_TIMEOUT_MS,
+    readPositiveTimeout(overrides?.firstEventTimeoutMs, defaults.firstEventTimeoutMs),
   );
   const idleTimeoutMs = readPositiveTimeout(
     process.env.INKOS_LLM_STREAM_IDLE_TIMEOUT_MS,
-    DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    readPositiveTimeout(overrides?.idleTimeoutMs, defaults.idleTimeoutMs),
   );
   const controller = new AbortController();
   const signal = callerSignal
@@ -100,7 +114,7 @@ function createStreamActivityDeadline(callerSignal?: AbortSignal): StreamActivit
   };
 }
 
-function readPositiveTimeout(value: string | undefined, fallback: number): number {
+function readPositiveTimeout(value: string | number | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
@@ -109,9 +123,10 @@ export function guardAssistantMessageStream<TApi extends PiApi>(
   model: PiModel<TApi>,
   start: (signal: AbortSignal) => AssistantMessageEventStream,
   callerSignal?: AbortSignal,
+  deadlineOptions?: StreamDeadlineOptions,
 ): AssistantMessageEventStream {
   const guarded = createAssistantMessageEventStream();
-  const deadline = createStreamActivityDeadline(callerSignal);
+  const deadline = createStreamActivityDeadline(callerSignal, undefined, deadlineOptions);
 
   void (async () => {
     let terminalSeen = false;
@@ -1381,6 +1396,8 @@ export async function chatCompletion(
     readonly onStreamProgress?: OnStreamProgress;
     readonly onTextDelta?: (text: string) => void;
     readonly signal?: AbortSignal;
+    readonly firstEventTimeoutMs?: number;
+    readonly streamIdleTimeoutMs?: number;
     // Diagnostics / connectivity checks want a fast pass-or-fail — set false to
     // skip the transient 502/503/429 retry+backoff (e.g. the doctor probe).
     readonly retry?: boolean;
@@ -1413,7 +1430,22 @@ export async function chatCompletion(
             ? { budgetTokens: client.defaults.thinkingBudget }
             : {}),
         });
-        const deadline = client.stream ? createStreamActivityDeadline(signal) : undefined;
+        // Pipeline agents often perform long-form generation before yielding the
+        // first token. Keep that path bounded, but do not apply the tighter
+        // interactive-chat deadline to it.
+        const deadline = client.stream
+          ? createStreamActivityDeadline(
+              signal,
+              {
+                firstEventTimeoutMs: DEFAULT_PIPELINE_FIRST_STREAM_EVENT_TIMEOUT_MS,
+                idleTimeoutMs: DEFAULT_PIPELINE_STREAM_IDLE_TIMEOUT_MS,
+              },
+              {
+                firstEventTimeoutMs: options?.firstEventTimeoutMs,
+                idleTimeoutMs: options?.streamIdleTimeoutMs,
+              },
+            )
+          : undefined;
         assertWithinContextWindow({
           piModel: resolvePiModel(client, model),
           model,
@@ -1555,7 +1587,13 @@ async function chatCompletionViaPiAi(
   let sawDone = false;
 
   try {
-    for await (const event of eventStream) {
+    const iterator = eventStream[Symbol.asyncIterator]();
+    while (true) {
+      const next = signal
+        ? await nextWithAbort(iterator, signal)
+        : await iterator.next();
+      if (next.done) break;
+      const event = next.value;
       onStreamActivity?.();
       if (event.type === "text_delta") {
         chunks.push(event.delta);

@@ -95,6 +95,18 @@ function makeErrorStream(message: string): AsyncIterable<Record<string, unknown>
   };
 }
 
+function makeNeverStream(): AsyncIterable<Record<string, unknown>> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<Record<string, unknown>> {
+      return {
+        async next() {
+          return new Promise<IteratorResult<Record<string, unknown>>>(() => {});
+        },
+      };
+    },
+  };
+}
+
 const MOCK_PI_MODEL: Model<Api> = {
   id: "test-model",
   name: "test-model",
@@ -234,7 +246,7 @@ describe("chatCompletion via pi-ai", () => {
     expect(opts.maxTokens).toBe(256);
   });
 
-  it("passes the caller AbortSignal to pi-ai", async () => {
+  it("propagates caller aborts through the guarded signal passed to pi-ai", async () => {
     mockStreamSimple.mockReturnValue(makeTextStream("ok"));
     const controller = new AbortController();
 
@@ -243,7 +255,24 @@ describe("chatCompletion via pi-ai", () => {
     });
 
     const opts = mockStreamSimple.mock.calls[0]?.[2] as Record<string, unknown>;
-    expect(opts.signal).toBe(controller.signal);
+    const signal = opts.signal as AbortSignal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+    controller.abort();
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("honors a caller-specific first-event deadline", async () => {
+    mockStreamSimple.mockReturnValue(makeNeverStream());
+
+    const error = await captureError(
+      chatCompletion(makeClient(), "test-model", [{ role: "user", content: "hi" }], {
+        firstEventTimeoutMs: 10,
+        retry: false,
+      }),
+    );
+
+    expect(error.message).toContain("LLM stream produced no event within 10ms");
   });
 
   it("drops non-ByteString headers before calling pi-ai", async () => {

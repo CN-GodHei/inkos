@@ -23,8 +23,12 @@ describe("guardAssistantMessageStream", () => {
   });
 
   it("ends a stream that never produces its first event", async () => {
-    process.env.INKOS_LLM_FIRST_EVENT_TIMEOUT_MS = "10";
-    const guarded = guardAssistantMessageStream(MODEL, () => createAssistantMessageEventStream());
+    const guarded = guardAssistantMessageStream(
+      MODEL,
+      () => createAssistantMessageEventStream(),
+      undefined,
+      { firstEventTimeoutMs: 10 },
+    );
 
     const events = [];
     for await (const event of guarded) events.push(event);
@@ -37,6 +41,24 @@ describe("guardAssistantMessageStream", () => {
         stopReason: "error",
         errorMessage: "LLM stream produced no event within 10ms",
       },
+    });
+  });
+
+  it("keeps environment overrides authoritative", async () => {
+    process.env.INKOS_LLM_FIRST_EVENT_TIMEOUT_MS = "10";
+    const guarded = guardAssistantMessageStream(
+      MODEL,
+      () => createAssistantMessageEventStream(),
+      undefined,
+      { firstEventTimeoutMs: 60_000 },
+    );
+
+    const events = [];
+    for await (const event of guarded) events.push(event);
+
+    expect(events[0]).toMatchObject({
+      type: "error",
+      error: { errorMessage: "LLM stream produced no event within 10ms" },
     });
   });
 });
