@@ -273,4 +273,24 @@ describe.sequential("publish packaging", () => {
       await rm(packDir, { recursive: true, force: true });
     }
   });
+
+  it("packs the built-in professional skills with core", { timeout: STUDIO_PACK_TEST_TIMEOUT_MS }, async () => {
+    const packDir = await mkdtemp(join(tmpdir(), "inkos-core-pack-"));
+
+    try {
+      const coreDir = resolve(workspaceRoot, "packages", "core");
+      const tarballPath = await packPackage(coreDir, packDir);
+      const tarArgs = [...tarForceLocalArgs(), "-tf"];
+      const archiveListing = execFileSync("tar", [...tarArgs, tarballPath], {
+        cwd: workspaceRoot,
+        encoding: "utf-8",
+      });
+
+      expect(archiveListing).toContain("package/skills/inkos-long-writing/SKILL.md");
+      expect(archiveListing).toContain("package/skills/inkos-story-review/references/review-matrix.md");
+      expect(archiveListing).toContain("package/skills/inkos-story-cover/SKILL.md");
+    } finally {
+      await rm(packDir, { recursive: true, force: true });
+    }
+  });
 });

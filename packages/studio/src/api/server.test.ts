@@ -352,6 +352,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     normalizeSkillIdList: actual.normalizeSkillIdList,
     createSkillRegistry: actual.createSkillRegistry,
     loadConfiguredAgentSkills: actual.loadConfiguredAgentSkills,
+    loadAvailableAgentSkills: actual.loadAvailableAgentSkills,
     createTranslationCreateTool: actual.createTranslationCreateTool,
     createLLMTranslationModel: createLLMTranslationModelMock,
     createTranslationProjectFromFile: actual.createTranslationProjectFromFile,

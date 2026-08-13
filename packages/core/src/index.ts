@@ -139,6 +139,8 @@ export {
 export {
   AgentSkillSchema,
   createSkillRegistry,
+  loadAvailableAgentSkills,
+  loadBuiltinAgentSkills,
   loadConfiguredAgentSkills,
   loadExternalAgentSkills,
   parseAgentSkillDocument,
@@ -146,6 +148,7 @@ export {
   type CreateSkillRegistryOptions,
   type ExternalSkillDiagnostic,
   type LoadConfiguredAgentSkillsInput,
+  type LoadAvailableAgentSkillsResult,
   type LoadExternalAgentSkillsInput,
   type LoadExternalAgentSkillsResult,
   type ParseAgentSkillDocumentOptions,

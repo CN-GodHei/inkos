@@ -65,7 +65,7 @@ import type { TranscriptEvent, TranscriptRole } from "../interaction/session-tra
 import type { PlayMode, SessionKind } from "../interaction/session.js";
 import type { ActionPayload, ActionSource, RequestedIntent } from "../interaction/action-envelope.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
-import { createSkillRegistry, loadConfiguredAgentSkills } from "../skills/index.js";
+import { createSkillRegistry, loadAvailableAgentSkills } from "../skills/index.js";
 import { assertSafeBookId } from "../utils/book-id.js";
 import { PlayStore } from "../play/play-store.js";
 import { isLlmStubEnabled, stubAgentStream } from "./llm-stub.js";
@@ -1018,7 +1018,7 @@ async function runAgentSessionUnlocked(
   const requestedIntent = config.requestedIntent;
   const actionPayload = config.actionPayload;
   const actionPayloadKey = actionPayloadCacheKey(actionPayload);
-  const configuredSkills = await loadConfiguredAgentSkills({ projectRoot });
+  const configuredSkills = await loadAvailableAgentSkills({ projectRoot });
   const skillRegistry = createSkillRegistry({ skills: configuredSkills.skills });
   const skillResolution = skillRegistry.resolveSkills({
     requestedSkills: config.requestedSkills,

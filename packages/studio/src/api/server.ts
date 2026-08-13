@@ -71,7 +71,7 @@ import {
   inferLanguage,
   ingestMaterial,
   createSkillRegistry,
-  loadConfiguredAgentSkills,
+  loadAvailableAgentSkills,
   parseAgentSkillDocument,
   getBuiltinPrompt,
   listBuiltinPromptPacks,
@@ -934,7 +934,7 @@ async function importStudioSkillFolder(
 }
 
 async function loadStudioSkills(root: string) {
-  const configured = await loadConfiguredAgentSkills({ projectRoot: root });
+  const configured = await loadAvailableAgentSkills({ projectRoot: root });
   const projectSkillIds = await listProjectSkillIds(root);
   const registry = createSkillRegistry({ skills: configured.skills });
   return {
