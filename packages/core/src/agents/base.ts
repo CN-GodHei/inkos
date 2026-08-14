@@ -1,5 +1,5 @@
 import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress } from "../llm/provider.js";
-import { chatCompletion } from "../llm/provider.js";
+import { runWorkerAgent } from "../agent/worker-agent.js";
 import { appendPromptPackGuidance } from "../prompts/prompt-pack.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
 import type { Logger } from "../utils/logger.js";
@@ -31,7 +31,7 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
-    return chatCompletion(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
+    return runWorkerAgent(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
       messages,
       this.ctx.activatedSkills,
     ), {
@@ -59,7 +59,7 @@ export abstract class BaseAgent {
   ): Promise<LLMResponse> {
     // OpenAI has native search — use it directly
     if (this.ctx.client.provider === "openai") {
-      return chatCompletion(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
+      return runWorkerAgent(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
         messages,
         this.ctx.activatedSkills,
       ), {

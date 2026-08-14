@@ -657,7 +657,7 @@ describe("chat message actions", () => {
     expect(fakeEventSources[0]?.closed).toBe(true);
   });
 
-  it("aborts only the chat round with scope=chat and keeps the running task card intact", async () => {
+  it("aborts the chat round and its running production workflow together", async () => {
     const store = createTestStore();
     const sessionId = await setupRunningTaskSession(store);
 
@@ -672,25 +672,23 @@ describe("chat message actions", () => {
     const sent = store.getState().sendMessage(sessionId, "顺便问一下");
     await vi.waitFor(() => expect(fakeEventSources).toHaveLength(2));
 
-    await store.getState().abortSession(sessionId, "chat");
+    await store.getState().abortSession(sessionId);
 
     const abortCall = fetchJson.mock.calls.find(([path]) => path === `/sessions/${sessionId}/abort`);
-    expect(abortCall?.[1]).toMatchObject({
-      method: "POST",
-      body: JSON.stringify({ scope: "chat" }),
+    expect(abortCall?.[1]).toEqual({ method: "POST" });
+    expect(findTaskExecution(store, sessionId)).toMatchObject({ status: "error" });
+    expect(fakeEventSources[1]?.closed).toBe(true);
+    expect(store.getState().sessions[sessionId]).toMatchObject({
+      isStreaming: false,
+      isChatStreaming: false,
+      stream: null,
     });
-    // scope=chat 不把任务卡标记为失败，也不关任务连接
-    expect(findTaskExecution(store, sessionId)).toMatchObject({ status: "running" });
-    expect(fakeEventSources[1]?.closed).toBe(false);
-    expect(store.getState().sessions[sessionId]).toMatchObject({ isStreaming: true, isChatStreaming: false });
 
     rejectAgent(new Error("This operation was aborted"));
     await sent;
 
-    // 聊天轮收尾后任务照旧运行
-    expect(findTaskExecution(store, sessionId)).toMatchObject({ status: "running" });
-    expect(fakeEventSources[1]?.closed).toBe(false);
-    expect(store.getState().sessions[sessionId]).toMatchObject({ isStreaming: true });
+    expect(findTaskExecution(store, sessionId)).toMatchObject({ status: "error" });
+    expect(store.getState().sessions[sessionId]).toMatchObject({ isStreaming: false });
   });
 
   function findChatToolExecution(store: ReturnType<typeof createTestStore>, sessionId: string) {

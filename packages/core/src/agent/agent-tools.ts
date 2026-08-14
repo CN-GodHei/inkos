@@ -832,10 +832,14 @@ export function createSubAgentTool(
               );
               const last = results.at(-1);
               const stoppedStatus = last?.status !== "ready-for-review" ? last?.status : undefined;
-              return textResult(
+              const output = textResult(
                 stoppedStatus
-                  ? `Writer completed ${results.length} of ${requestedCount} requested chapters for "${targetBookId}" and stopped because chapter ${last?.chapterNumber} ended with status "${stoppedStatus}".`
-                  : `Writer completed ${results.length} consecutive chapters for "${targetBookId}".`,
+                  ? sessionIsZh
+                    ? `已完成 ${results.length}/${requestedCount} 章；第 ${last?.chapterNumber} 章状态为 ${stoppedStatus}，批量写作已停止，请复核后再继续。`
+                    : `Writer completed ${results.length} of ${requestedCount} requested chapters for "${targetBookId}" and stopped because chapter ${last?.chapterNumber} ended with status "${stoppedStatus}".`
+                  : sessionIsZh
+                    ? `已连续完成 ${results.length} 章（第 ${results[0]?.chapterNumber} 章至第 ${last?.chapterNumber} 章）。`
+                    : `Writer completed ${results.length} consecutive chapters for "${targetBookId}".`,
                 {
                   kind: "chapters_written",
                   bookId: targetBookId,
@@ -852,6 +856,7 @@ export function createSubAgentTool(
                   ...(stoppedStatus ? { stoppedStatus } : {}),
                 },
               );
+              return stoppedStatus ? { ...output, isError: true } : output;
             }
             progress(`Writing next chapter for "${targetBookId}"...`);
             const result = await runPipelineWithAgentContext(
@@ -865,10 +870,20 @@ export function createSubAgentTool(
             const wordCount = (result as any).wordCount ?? "unknown";
             const chapterNumberResult = (result as any).chapterNumber;
             const titleResult = (result as any).title;
-            const message = resultStatus && resultStatus !== "ready-for-review" && resultStatus !== "active"
-              ? `Chapter output for "${targetBookId}" ended with status "${resultStatus}" and needs review before it is treated as complete. Word count: ${wordCount}.`
-              : `Chapter written for "${targetBookId}". Word count: ${wordCount}.`;
-            return textResult(
+            const needsReview = Boolean(resultStatus && resultStatus !== "ready-for-review" && resultStatus !== "active");
+            const chapterRef = chapterNumberResult
+              ? sessionIsZh
+                ? `第 ${chapterNumberResult} 章${titleResult ? `《${titleResult}》` : ""}`
+                : `chapter ${chapterNumberResult}${titleResult ? ` "${titleResult}"` : ""}`
+              : sessionIsZh ? "下一章" : "the next chapter";
+            const message = needsReview
+              ? sessionIsZh
+                ? `已为 ${targetBookId} 写出${chapterRef}，字数 ${wordCount}，但审稿未通过，状态 ${resultStatus}，需要复核后再继续。`
+                : `Wrote ${chapterRef} for ${targetBookId}: ${wordCount} words, but review did not pass (status: ${resultStatus}). Manual review is required before continuing.`
+              : sessionIsZh
+                ? `已为 ${targetBookId} 完成${chapterRef}，字数 ${wordCount}，状态 ${resultStatus ?? "ready-for-review"}。`
+                : `Completed ${chapterRef} for ${targetBookId}: ${wordCount} words, status ${resultStatus ?? "ready-for-review"}.`;
+            const output = textResult(
               message,
               {
                 kind: "chapter_written",
@@ -881,6 +896,7 @@ export function createSubAgentTool(
                 ...(result.contextTrace ? { contextTrace: result.contextTrace } : {}),
               },
             );
+            return needsReview ? { ...output, isError: true } : output;
           }
 
           case "auditor": {

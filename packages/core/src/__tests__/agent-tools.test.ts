@@ -931,10 +931,11 @@ describe("agent deterministic writing tools", () => {
       chapterNumber: 1,
       status: "audit-failed",
     });
+    expect((result as typeof result & { isError?: boolean }).isError).toBe(true);
     expect(result.content[0]?.type).toBe("text");
     if (result.content[0]?.type === "text") {
       expect(result.content[0].text).toContain("audit-failed");
-      expect(result.content[0].text).toContain("needs review");
+      expect(result.content[0].text).toContain("需要复核");
       expect(result.content[0].text).not.toContain("Chapter written");
     }
   });

@@ -27,6 +27,7 @@ const loadChapterIndexMock = vi.fn();
 const loadBookConfigMock = vi.fn();
 const createLLMClientMock = vi.fn(() => ({}));
 const chatCompletionMock = vi.fn();
+const runWorkerAgentMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
 const pipelineConfigs: unknown[] = [];
 const pipelineAbortSignals: Array<AbortSignal | undefined> = [];
@@ -279,6 +280,7 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     inferLanguage: actual.inferLanguage,
     ingestMaterial: actual.ingestMaterial,
     chatCompletion: chatCompletionMock,
+    runWorkerAgent: runWorkerAgentMock,
     loadProjectConfig: loadProjectConfigMock,
     processProjectInteractionRequest: processProjectInteractionRequestMock,
     createInteractionToolsFromDeps: createInteractionToolsFromDepsMock,
@@ -530,6 +532,11 @@ describe("createStudioServer daemon lifecycle", () => {
     createShortFictionRunToolMock.mockClear();
     chatCompletionMock.mockReset();
     chatCompletionMock.mockResolvedValue({
+      content: "pong",
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+    runWorkerAgentMock.mockReset();
+    runWorkerAgentMock.mockResolvedValue({
       content: "pong",
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
     });
@@ -2822,7 +2829,7 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("generates a non-mutating chapter inspiration card from the current manuscript", async () => {
-    chatCompletionMock.mockResolvedValueOnce({
+    runWorkerAgentMock.mockResolvedValueOnce({
       content: "## 灵感卡\n\n让证人先交出一页伪账，再由水印暴露替换时间。",
       usage: { inputTokens: 100, outputTokens: 30 },
     });
@@ -2845,7 +2852,7 @@ describe("createStudioServer daemon lifecycle", () => {
       chapterNumber: 3,
       card: expect.stringContaining("水印"),
     });
-    expect(chatCompletionMock).toHaveBeenCalledWith(
+    expect(runWorkerAgentMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.any(String),
       expect.arrayContaining([
@@ -2854,7 +2861,7 @@ describe("createStudioServer daemon lifecycle", () => {
           content: expect.stringContaining("不要增加新角色"),
         }),
       ]),
-      expect.objectContaining({ temperature: 0.9 }),
+      expect.objectContaining({ temperature: 0.9, signal: expect.any(AbortSignal) }),
     );
     await expect(readFile(chapterPath, "utf-8")).resolves.toBe(before);
   });
@@ -4142,7 +4149,7 @@ describe("createStudioServer daemon lifecycle", () => {
     await ssePump;
   });
 
-  it("aborts only the chat round when scope=chat and leaves the production task controller alive", async () => {
+  it("aborts the Pi turn and production task through the same session stop", async () => {
     let resolveRun!: () => void;
     let capturedSignal: AbortSignal | undefined;
     createShortFictionRunToolMock.mockImplementationOnce(() => ({
@@ -4189,20 +4196,10 @@ describe("createStudioServer daemon lifecycle", () => {
 
     const chatAbort = await app.request("http://localhost/api/v1/sessions/chat-scope-session/abort", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope: "chat" }),
     });
 
     expect(chatAbort.status).toBe(200);
     expect(abortAgentSessionMock).toHaveBeenCalledWith(root, "chat-scope-session");
-    // scope=chat 不触发任务控制器的 abort
-    expect(capturedSignal?.aborted).toBe(false);
-
-    // 默认（不带 scope）保持旧行为：任务控制器一起中止
-    const fullAbort = await app.request("http://localhost/api/v1/sessions/chat-scope-session/abort", {
-      method: "POST",
-    });
-    expect(fullAbort.status).toBe(200);
     expect(capturedSignal?.aborted).toBe(true);
 
     resolveRun();
@@ -4538,7 +4535,12 @@ describe("createStudioServer daemon lifecycle", () => {
         activeBookId: "demo-book",
       },
     });
-    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book");
+    expect(writeNextChapterMock).toHaveBeenCalledWith(
+      "demo-book",
+      undefined,
+      undefined,
+      "继续",
+    );
     expect(runAgentSessionMock).not.toHaveBeenCalled();
     // 任务开始时：指令作为 user 消息预写进 transcript。
     expect(appendManualSessionMessagesMock).toHaveBeenCalledWith(

@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
-import { chatCompletion, createLLMClient } from "../llm/provider.js";
+import { createLLMClient } from "../llm/provider.js";
+import { runWorkerAgent } from "../agent/worker-agent.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode, RevisionGate } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
@@ -26,7 +27,7 @@ import { archiveChapterVersion, readChapterUserBrief } from "../state/chapter-wo
 import { MemoryDB, type Fact } from "../state/memory-db.js";
 import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher.js";
 import type { WebhookEvent } from "../notify/webhook.js";
-import type { AgentContext } from "../agents/base.js";
+import { appendActivatedSkillGuidance, type AgentContext } from "../agents/base.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
@@ -2606,10 +2607,10 @@ Base the analysis on the text's actual features, not generalities. Support each 
         const styleUserPrompt = lang === "en"
           ? `Analyze the writing style of the following reference text:\n\n${sample}`
           : `分析以下参考文本的写作风格：\n\n${sample}`;
-        const response = await chatCompletion(this.config.client, this.config.model, [
+        const response = await runWorkerAgent(this.config.client, this.config.model, appendActivatedSkillGuidance([
           { role: "system", content: styleSystemPrompt },
           { role: "user", content: styleUserPrompt },
-        ], { temperature: 0.3, signal: this.currentAbortSignal() });
+        ], this.currentActivatedSkills()), { temperature: 0.3, signal: this.currentAbortSignal() });
         qualitativeGuide = response.content.trim()
           ? response.content
           : this.buildDeterministicStyleGuide(profile, {
@@ -2733,7 +2734,7 @@ Base the analysis on the text's actual features, not generalities. Support each 
         readSafe(join(parentDir, "story/character_matrix.md")),
       ]);
 
-    const response = await chatCompletion(this.config.client, this.config.model, [
+    const response = await runWorkerAgent(this.config.client, this.config.model, appendActivatedSkillGuidance([
       {
         role: "system",
         content: `你是一位网络小说架构师。基于正传的全部设定和状态文件，生成一份完整的"正传正典参照"文档，供番外写作和审计使用。
@@ -2812,7 +2813,7 @@ ${emotions}
 ## 正传角色矩阵
 ${matrix}`,
       },
-    ], { temperature: 0.3, signal: this.currentAbortSignal() });
+    ], this.currentActivatedSkills()), { temperature: 0.3, signal: this.currentAbortSignal() });
 
     // Append deterministic meta block (LLM may hallucinate timestamps)
     const metaBlock = [

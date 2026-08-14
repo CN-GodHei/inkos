@@ -38,6 +38,7 @@ import {
   probeModelsFromUpstream,
   fetchWithProxy,
   chatCompletion,
+  runWorkerAgent,
   buildExportArtifact,
   evaluateBookQuality,
   ConsolidatorAgent,
@@ -1227,163 +1228,6 @@ function toolResultText(result: unknown, lang: StudioLanguage = "zh"): string {
   return text || pick(lang, "已完成。", "Done.");
 }
 
-interface WriteNextChapterToolResult {
-  // 章节写完但审稿未通过时置 true：任务卡按错误态展示，但请求仍以 200 返回结果文本。
-  readonly isError?: boolean;
-  readonly content: ReadonlyArray<{ readonly type: "text"; readonly text: string }>;
-  readonly details: {
-    readonly kind: "chapter_written" | "chapters_written";
-    readonly bookId: string;
-    readonly chapterNumber?: number;
-    readonly title?: string;
-    readonly wordCount?: number;
-    readonly status?: string;
-    readonly requestedCount?: number;
-    readonly completedCount?: number;
-    readonly stoppedStatus?: string;
-    readonly chapters?: ReadonlyArray<{
-      readonly chapterNumber: number;
-      readonly title?: string;
-      readonly wordCount: number;
-      readonly status?: string;
-    }>;
-  };
-}
-
-function buildWriteNextResponseText(
-  bookId: string,
-  writeResult: { readonly chapterNumber: number; readonly title?: string; readonly wordCount: number; readonly status?: string },
-  writeNeedsReview: boolean,
-  lang: StudioLanguage,
-): string {
-  const zhResponseText = writeNeedsReview
-    ? [
-        `已为 ${bookId} 写出第 ${writeResult.chapterNumber} 章`,
-        writeResult.title ? `《${writeResult.title}》` : "",
-        `，字数 ${writeResult.wordCount}，但审稿未通过，状态 ${writeResult.status}，需要复核后再继续。`,
-      ].join("")
-    : [
-        `已为 ${bookId} 完成第 ${writeResult.chapterNumber} 章`,
-        writeResult.title ? `《${writeResult.title}》` : "",
-        `，字数 ${writeResult.wordCount}，状态 ${writeResult.status}。`,
-      ].join("");
-  const enChapterRef = writeResult.title
-    ? `chapter ${writeResult.chapterNumber} "${writeResult.title}"`
-    : `chapter ${writeResult.chapterNumber}`;
-  const enResponseText = writeNeedsReview
-    ? `Wrote ${enChapterRef} for ${bookId}: ${writeResult.wordCount} words, but the review did not pass (status: ${writeResult.status}). Manual review is required before continuing.`
-    : `Completed ${enChapterRef} for ${bookId}: ${writeResult.wordCount} words, status ${writeResult.status}.`;
-  return pick(lang, zhResponseText, enResponseText);
-}
-
-// 写下一章的确认式任务工具：复用生产工具的 AgentContext，让取消信号与
-// 专业 Skill 同时贯穿写作流程（pipeline 在下一个检查点抛出中止错误）。
-function createWriteNextChapterTool(
-  pipeline: PipelineRunner,
-  bookId: string,
-  lang: StudioLanguage,
-  chapterCount = 1,
-  activatedSkills: ReturnType<typeof resolveProductionSkillActivations> = [],
-): {
-  readonly name: "sub_agent";
-  readonly execute: (
-    toolCallId: string,
-    params: Record<string, unknown>,
-    signal: AbortSignal | undefined,
-    onUpdate?: (partialResult: unknown) => void,
-  ) => Promise<WriteNextChapterToolResult>;
-} {
-  return {
-    name: "sub_agent",
-    async execute(_toolCallId, _params, signal, onUpdate) {
-      if (chapterCount > 1) {
-        onUpdate?.({
-          content: [{
-            type: "text",
-            text: pick(
-              lang,
-              `正在为 ${bookId} 连续写 ${chapterCount} 章…`,
-              `Writing ${chapterCount} consecutive chapters for ${bookId}...`,
-            ),
-          }],
-        });
-        const results = await pipeline.runWithAgentContext(
-          { signal, activatedSkills },
-          () => pipeline.writeChapters(bookId, chapterCount, {
-            onChapterComplete(result, completedCount, requestedCount) {
-              onUpdate?.({
-                content: [{
-                  type: "text",
-                  text: pick(
-                    lang,
-                    `第 ${completedCount}/${requestedCount} 章已落盘：第 ${result.chapterNumber} 章《${result.title}》。`,
-                    `${completedCount}/${requestedCount} persisted: chapter ${result.chapterNumber} "${result.title}".`,
-                  ),
-                }],
-              });
-            },
-          }),
-        );
-        const last = results.at(-1);
-        const stoppedStatus = last?.status !== "ready-for-review" ? last?.status : undefined;
-        const responseText = stoppedStatus
-          ? pick(
-              lang,
-              `已完成 ${results.length}/${chapterCount} 章；第 ${last?.chapterNumber} 章状态为 ${stoppedStatus}，批量写作已停止，请复核后再继续。`,
-              `Completed ${results.length}/${chapterCount} chapters. Chapter ${last?.chapterNumber} ended with ${stoppedStatus}, so the batch stopped for review.`,
-            )
-          : pick(
-              lang,
-              `已连续完成 ${results.length} 章（第 ${results[0]?.chapterNumber} 章至第 ${last?.chapterNumber} 章）。`,
-              `Completed ${results.length} consecutive chapters (chapters ${results[0]?.chapterNumber}-${last?.chapterNumber}).`,
-            );
-        return {
-          ...(stoppedStatus ? { isError: true } : {}),
-          content: [{ type: "text", text: responseText }],
-          details: {
-            kind: "chapters_written",
-            bookId,
-            requestedCount: chapterCount,
-            completedCount: results.length,
-            chapters: results.map((result) => ({
-              chapterNumber: result.chapterNumber,
-              title: result.title,
-              wordCount: result.wordCount,
-              status: result.status,
-            })),
-            ...(stoppedStatus ? { stoppedStatus } : {}),
-            skillIds: activatedSkillIds(activatedSkills),
-          },
-        };
-      }
-      onUpdate?.({
-        content: [{
-          type: "text",
-          text: pick(lang, `正在为 ${bookId} 写下一章…`, `Writing the next chapter for ${bookId}...`),
-        }],
-      });
-      const writeResult = await pipeline.runWithAgentContext(
-        { signal, activatedSkills },
-        () => pipeline.writeNextChapter(bookId),
-      );
-      const writeNeedsReview = Boolean(writeResult.status && writeResult.status !== "ready-for-review");
-      return {
-        ...(writeNeedsReview ? { isError: true } : {}),
-        content: [{ type: "text", text: buildWriteNextResponseText(bookId, writeResult, writeNeedsReview, lang) }],
-        details: {
-          kind: "chapter_written",
-          bookId,
-          chapterNumber: writeResult.chapterNumber,
-          title: writeResult.title,
-          wordCount: writeResult.wordCount,
-          status: writeResult.status,
-          skillIds: activatedSkillIds(activatedSkills),
-        },
-      };
-    },
-  };
-}
-
 async function executeConfirmedProductionAction(args: {
   readonly pipeline: PipelineRunner;
   readonly root: string;
@@ -1427,8 +1271,7 @@ async function executeConfirmedProductionAction(args: {
     | ReturnType<typeof createPlayStartTool>
     | ReturnType<typeof createDraftStructureTool>
     | ReturnType<typeof createConnectChoiceTool>
-    | ReturnType<typeof createRemoveNodeTool>
-    | ReturnType<typeof createWriteNextChapterTool>;
+    | ReturnType<typeof createRemoveNodeTool>;
   let params: Record<string, unknown>;
   let agent: string | undefined;
 
@@ -1472,15 +1315,17 @@ async function executeConfirmedProductionAction(args: {
       throw new ApiError(400, "BOOK_ID_REQUIRED", pick(lang, "写下一章需要先打开一本书。", "Writing the next chapter requires an active book."));
     }
     const chapterCount = actionPayload?.writeNext?.chapterCount ?? 1;
-    tool = createWriteNextChapterTool(
-      args.pipeline,
-      args.bookId,
-      lang,
-      chapterCount,
-      productionSkills("longWriting"),
-    );
+    tool = createSubAgentTool(args.pipeline, args.bookId, args.root, {
+      language: lang,
+      workerSkills: (worker) => worker === "writer" ? productionSkills("longWriting") : [],
+    });
     agent = "writer";
-    params = { agent: "writer", bookId: args.bookId };
+    params = {
+      agent: "writer",
+      bookId: args.bookId,
+      instruction: args.instruction,
+      chapterCount,
+    };
   } else if (args.requestedIntent === "generate_cover") {
     const payload = actionPayload?.generateCover;
     const title = requirePayloadText(payload?.title, pick(lang, "确认生成封面缺少标题，请重新生成确认卡。", "The cover generation confirmation is missing a title. Regenerate the confirmation card."));
@@ -3100,7 +2945,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       ]);
       const language = book.language === "en" ? "en" : "zh";
       const requestedBrief = typeof body.brief === "string" ? body.brief.trim() : "";
-      const response = await chatCompletion(
+      const response = await runWorkerAgent(
         pipelineConfig.client,
         pipelineConfig.model,
         [
@@ -3133,7 +2978,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             ].filter(Boolean).join("\n\n"),
           },
         ],
-        { temperature: 0.9, maxTokens: 600 },
+        { temperature: 0.9, maxTokens: 600, signal: c.req.raw.signal },
       );
       const card = response.content.trim();
       if (!card) {
@@ -4684,16 +4529,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/sessions/:sessionId/abort", async (c) => {
     const sessionId = c.req.param("sessionId");
-    // scope=chat 只中止当前聊天轮（agent loop），不动后台生产任务的控制器；
-    // 默认 all 维持旧行为：聊天轮和生产任务一起停。
-    const body = await c.req.json<{ scope?: unknown }>().catch(() => ({} as { scope?: unknown }));
-    const scope = body.scope === "chat" ? "chat" : "all";
-    let taskAborted = false;
-    if (scope === "all") {
-      const controller = await findRunningTaskController(sessionId);
-      controller?.abort();
-      taskAborted = Boolean(controller);
-    }
+    const controller = await findRunningTaskController(sessionId);
+    controller?.abort();
+    const taskAborted = Boolean(controller);
     const aborted = abortAgentSession(root, sessionId) || taskAborted;
     broadcast("agent:aborted", { sessionId, aborted });
     return c.json({ ok: true, aborted });
@@ -6531,6 +6369,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         model: currentConfig.llm.model,
         maxTokens: body.maxTokens,
         activatedSkills,
+        signal: c.req.raw.signal,
       });
       const result = await runTranslationProject(root, id, {
         model,

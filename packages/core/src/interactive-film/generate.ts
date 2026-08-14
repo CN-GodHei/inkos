@@ -1,4 +1,5 @@
-import { chatCompletion, type LLMClient } from "../llm/provider.js";
+import type { LLMClient } from "../llm/provider.js";
+import { runWorkerAgent } from "../agent/worker-agent.js";
 import { appendActivatedSkillGuidance } from "../agents/base.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { StoryGraphSchema, type StoryGraph } from "./graph-schema.js";
@@ -49,6 +50,7 @@ export async function generateStoryGraph(
     readonly maxTokens?: number;
     readonly language?: "zh" | "en";
     readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
+    readonly signal?: AbortSignal;
   },
 ): Promise<StoryGraph> {
   const language = options?.language ?? "zh";
@@ -56,9 +58,13 @@ export async function generateStoryGraph(
   const userPrompt = language === "en"
     ? `Title: ${input.title}\nPremise: ${input.premise}`
     : `标题：${input.title}\n前提：${input.premise}`;
-  const res = await chatCompletion(client, model, appendActivatedSkillGuidance([
+  const res = await runWorkerAgent(client, model, appendActivatedSkillGuidance([
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
-  ], options?.activatedSkills), { temperature: 0.5, maxTokens: options?.maxTokens ?? 8000 });
+  ], options?.activatedSkills), {
+    temperature: 0.5,
+    maxTokens: options?.maxTokens ?? 8000,
+    signal: options?.signal,
+  });
   return buildStoryGraphFromLLMText(res.content, input.projectId);
 }

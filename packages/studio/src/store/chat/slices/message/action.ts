@@ -340,41 +340,23 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     });
   },
 
-  abortSession: async (sessionId, scope = "all") => {
+  abortSession: async (sessionId) => {
     const session = get().sessions[sessionId];
-    if (scope === "all") {
-      session?.stream?.close();
-      const stoppedAt = Date.now();
-      const stoppedMessage = tr("已由用户停止", "Stopped by user");
-      set((state) => ({
-        sessions: updateSession(state.sessions, sessionId, (runtime) => ({
-          isStreaming: false,
-          isChatStreaming: false,
-          stream: null,
-          lastError: null,
-          messages: markRunningToolsFailed(runtime.messages, stoppedMessage, stoppedAt),
-        })),
-      }));
-    } else {
-      // scope=chat：只停当前聊天轮，后台任务还在跑。
-      // 不关连接（任务事件还要继续到达）、不把任务卡标记为失败；
-      // 聊天轮自身的收尾由 sendMessage 的 finally 完成。
-      set((state) => ({
-        sessions: updateSession(state.sessions, sessionId, () => ({
-          isChatStreaming: false,
-          lastError: null,
-        })),
-      }));
-    }
+    session?.stream?.close();
+    const stoppedAt = Date.now();
+    const stoppedMessage = tr("已由用户停止", "Stopped by user");
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, (runtime) => ({
+        isStreaming: false,
+        isChatStreaming: false,
+        stream: null,
+        lastError: null,
+        messages: markRunningToolsFailed(runtime.messages, stoppedMessage, stoppedAt),
+      })),
+    }));
     try {
       await fetchJson(`/sessions/${sessionId}/abort`, {
         method: "POST",
-        ...(scope === "chat"
-          ? {
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ scope: "chat" }),
-            }
-          : {}),
       });
     } catch (error) {
       get().addErrorMessage(sessionId, error instanceof Error ? error.message : String(error));

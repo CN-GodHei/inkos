@@ -1,7 +1,8 @@
 import { Type, type Static } from "@mariozechner/pi-ai";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { applyGraphDelta } from "../interactive-film/authoring-store.js";
-import { chatCompletion, type LLMClient } from "../llm/provider.js";
+import type { LLMClient } from "../llm/provider.js";
+import { runWorkerAgent } from "./worker-agent.js";
 import { loadStoryGraph } from "../interactive-film/graph-store.js";
 import { buildFilmAuthoringContext } from "../interactive-film/film-context.js";
 import { buildFillNodeDeltaFromLLMText, buildStructureDeltaFromLLMText } from "../interactive-film/authoring-generate.js";
@@ -169,7 +170,7 @@ export function createUpsertCharactersTool(projectRoot: string, projectId: strin
 // ---------------------------------------------------------------------------
 
 export interface FilmLLMDeps {
-  readonly chat: (system: string, user: string) => Promise<string>;
+  readonly chat: (system: string, user: string, signal?: AbortSignal) => Promise<string>;
   readonly skillIds?: () => ReadonlyArray<string>;
 }
 
@@ -178,11 +179,11 @@ function defaultChat(
   model: string,
   activatedSkills?: () => ReadonlyArray<ActivatedSkillGuidance>,
 ): FilmLLMDeps["chat"] {
-  return async (system, user) => {
-    const res = await chatCompletion(client, model, appendActivatedSkillGuidance([
+  return async (system, user, signal) => {
+    const res = await runWorkerAgent(client, model, appendActivatedSkillGuidance([
       { role: "system", content: system },
       { role: "user", content: user },
-    ], activatedSkills?.()), { temperature: 0.6, maxTokens: 4000 });
+    ], activatedSkills?.()), { temperature: 0.6, maxTokens: 4000, signal });
     return res.content;
   };
 }
@@ -221,7 +222,7 @@ export function createFillNodeTool(
     description: "interactive-film authoring: write/rewrite one node's scene, dialogue and choices via the model. Applies immediately.",
     label: "Fill Node",
     parameters: FillNodeParams,
-    async execute(_id, params: Static<typeof FillNodeParams>) {
+    async execute(_id, params: Static<typeof FillNodeParams>, signal) {
       const graph = await loadStoryGraph(projectRoot, projectId);
       const context = graph ? buildFilmAuthoringContext(graph) : "(empty graph)";
       const systemPrompt = await appendPromptPackGuidance(nodeSystemPrompt(language), {
@@ -231,7 +232,7 @@ export function createFillNodeTool(
       const userPrompt = language === "en"
         ? `${context}\n\nNode id to fill: ${params.nodeId}\nInstruction: ${params.instruction}`
         : `${context}\n\n要填的节点 id：${params.nodeId}\n指令：${params.instruction}`;
-      const text = await deps.chat(systemPrompt, userPrompt);
+      const text = await deps.chat(systemPrompt, userPrompt, signal);
       const { rev } = await applyGraphDelta({ projectRoot, projectId, delta: buildFillNodeDeltaFromLLMText(text, params.nodeId), phase: "workshop" });
       return textResult(`Node ${params.nodeId} filled (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.script", {
         skillIds: deps.skillIds?.() ?? [],
@@ -251,7 +252,7 @@ export function createReviseNodeTool(
     description: "interactive-film authoring: revise one existing node per instruction. Applies immediately.",
     label: "Revise Node",
     parameters: FillNodeParams,
-    async execute(_id, params: Static<typeof FillNodeParams>) {
+    async execute(_id, params: Static<typeof FillNodeParams>, signal) {
       const graph = await loadStoryGraph(projectRoot, projectId);
       const context = graph ? buildFilmAuthoringContext(graph) : "(empty graph)";
       const current = graph?.nodes.find((n) => n.id === params.nodeId);
@@ -262,7 +263,7 @@ export function createReviseNodeTool(
       const userPrompt = language === "en"
         ? `${context}\n\nNode id to revise: ${params.nodeId}\nCurrent content: ${JSON.stringify(current ?? {})}\nRevision instruction: ${params.instruction}`
         : `${context}\n\n要修改的节点 id：${params.nodeId}\n现有内容：${JSON.stringify(current ?? {})}\n修改指令：${params.instruction}`;
-      const text = await deps.chat(systemPrompt, userPrompt);
+      const text = await deps.chat(systemPrompt, userPrompt, signal);
       const { rev } = await applyGraphDelta({ projectRoot, projectId, delta: buildFillNodeDeltaFromLLMText(text, params.nodeId), phase: "workshop" });
       return textResult(`Node ${params.nodeId} revised (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.script", {
         skillIds: deps.skillIds?.() ?? [],
@@ -304,7 +305,7 @@ export function createDraftStructureTool(
     description: "interactive-film authoring: draft the branching node skeleton + topology. Structural — requires user confirmation.",
     label: "Draft Structure",
     parameters: DraftStructureParams,
-    async execute(_id, params: Static<typeof DraftStructureParams>) {
+    async execute(_id, params: Static<typeof DraftStructureParams>, signal) {
       const graph = await loadStoryGraph(projectRoot, projectId);
       const context = graph ? buildFilmAuthoringContext(graph) : "(empty graph)";
       const systemPrompt = await appendPromptPackGuidance(language === "en" ? STRUCT_SYSTEM_EN : STRUCT_SYSTEM_ZH, {
@@ -314,7 +315,7 @@ export function createDraftStructureTool(
       const userPrompt = language === "en"
         ? `${context}\n\nSkeleton instruction: ${params.instruction}`
         : `${context}\n\n骨架指令：${params.instruction}`;
-      const text = await deps.chat(systemPrompt, userPrompt);
+      const text = await deps.chat(systemPrompt, userPrompt, signal);
       const { graph: next, rev } = await applyGraphDelta({ projectRoot, projectId, delta: buildStructureDeltaFromLLMText(text), phase: "structure" });
       return textResult(`Structure drafted: ${next.nodes.length} nodes (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.story-graph", {
         skillIds: deps.skillIds?.() ?? [],
