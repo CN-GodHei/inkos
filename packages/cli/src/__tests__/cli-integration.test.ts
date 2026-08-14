@@ -552,8 +552,7 @@ describe("CLI integration", () => {
     it("checks environment health", () => {
       const { stdout } = runStderr(["doctor"]);
       expect(stdout).toContain("InkOS Doctor");
-      expect(stdout).toContain("Node.js >= 20");
-      expect(stdout).toContain("SQLite memory index");
+      expect(stdout).toContain("Node.js >= 22");
       expect(stdout).toContain("inkos.json");
     });
 

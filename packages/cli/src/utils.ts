@@ -1,11 +1,9 @@
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createLLMClient, StateManager, createLogger, createStderrSink, createJsonLineSink, resolveEffectiveLLMConfig, loadLLMEnvLayers, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, type EffectiveLLMConfigResult, type LLMConfigCliOverrides, type ProjectConfig, type PipelineConfig, type LogSink } from "@actalk/inkos-core";
-import { formatSqliteMemorySupportWarning } from "./runtime-requirements.js";
 
 export { GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH };
 
-let sqliteMemorySupportWarned = false;
 
 export async function resolveContext(opts: {
   readonly context?: string;
@@ -113,14 +111,6 @@ export function buildPipelineConfig(
     readonly logFile?: NodeJS.WritableStream;
   },
 ): PipelineConfig {
-  if (!extra?.quiet && !sqliteMemorySupportWarned) {
-    const warning = formatSqliteMemorySupportWarning();
-    if (warning) {
-      sqliteMemorySupportWarned = true;
-      process.stderr.write(`[WARN] ${warning}\n`);
-    }
-  }
-
   const sinks: LogSink[] = [];
   if (!extra?.quiet) {
     sinks.push(createStderrSink({ minLevel: "info" }));
