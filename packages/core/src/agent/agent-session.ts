@@ -65,7 +65,13 @@ import type { TranscriptEvent, TranscriptRole } from "../interaction/session-tra
 import type { PlayMode, SessionKind } from "../interaction/session.js";
 import type { ActionPayload, ActionSource, RequestedIntent } from "../interaction/action-envelope.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
-import { createSkillRegistry, loadAvailableAgentSkills } from "../skills/index.js";
+import {
+  createSkillRegistry,
+  loadAvailableAgentSkills,
+  mergeActivatedSkillGuidance,
+  resolveProductionSkillActivations,
+  type ProductionSkillCapability,
+} from "../skills/index.js";
 import { assertSafeBookId } from "../utils/book-id.js";
 import { PlayStore } from "../play/play-store.js";
 import { isLlmStubEnabled, stubAgentStream } from "./llm-stub.js";
@@ -799,6 +805,7 @@ type CreateAgentToolsForModeParams = {
   readonly requestedSkillIds?: () => ReadonlyArray<string>;
   readonly activeSkills?: () => ReadonlyArray<ActivatedSkillGuidance>;
   readonly workerSkills?: (agent: string) => ReadonlyArray<ActivatedSkillGuidance>;
+  readonly productionSkills?: (capability: ProductionSkillCapability) => ReadonlyArray<ActivatedSkillGuidance>;
 };
 
 function createAgentToolsForMode(params: CreateAgentToolsForModeParams) {
@@ -838,7 +845,12 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
 
   if (params.sessionKind === "short") {
     if (isConfirmed("short_run")) {
-      return [createShortFictionRunTool(params.pipeline, params.projectRoot, { actionPayload: params.actionPayload, language: lang })];
+      return [createShortFictionRunTool(params.pipeline, params.projectRoot, {
+        actionPayload: params.actionPayload,
+        language: lang,
+        defaultSkills: params.productionSkills?.("shortWriting"),
+        activeSkills: params.activeSkills,
+      })];
     }
     if (isConfirmed("generate_cover")) {
       return [createGenerateCoverTool(params.projectRoot, { actionPayload: params.actionPayload })];
@@ -848,21 +860,36 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
 
   if (params.sessionKind === "script") {
     if (isConfirmed("script_create")) {
-      return [createScriptCreationTool(params.pipeline, params.projectRoot, { actionPayload: params.actionPayload, language: lang })];
+      return [createScriptCreationTool(params.pipeline, params.projectRoot, {
+        actionPayload: params.actionPayload,
+        language: lang,
+        defaultSkills: params.productionSkills?.("script"),
+        activeSkills: params.activeSkills,
+      })];
     }
     return [proposalTool, materialTool, materialRetrievalTool];
   }
 
   if (params.sessionKind === "storyboard") {
     if (isConfirmed("storyboard_create")) {
-      return [createStoryboardCreationTool(params.pipeline, params.projectRoot, { actionPayload: params.actionPayload, language: lang })];
+      return [createStoryboardCreationTool(params.pipeline, params.projectRoot, {
+        actionPayload: params.actionPayload,
+        language: lang,
+        defaultSkills: params.productionSkills?.("storyboard"),
+        activeSkills: params.activeSkills,
+      })];
     }
     return [proposalTool, materialTool, materialRetrievalTool];
   }
 
   if (params.sessionKind === "interactive-film") {
     if (isConfirmed("interactive_film_create")) {
-      return [createInteractiveFilmCreationTool(params.pipeline, params.projectRoot, { actionPayload: params.actionPayload, language: lang })];
+      return [createInteractiveFilmCreationTool(params.pipeline, params.projectRoot, {
+        actionPayload: params.actionPayload,
+        language: lang,
+        defaultSkills: params.productionSkills?.("interactiveFilm"),
+        activeSkills: params.activeSkills,
+      })];
     }
     return [proposalTool, materialTool, materialRetrievalTool];
   }
@@ -873,7 +900,12 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
       throw new Error("interactive-film-authoring session requires a non-null bookId");
     }
     const agentCtx = params.pipeline.createAgentContext("film-authoring", projectId);
-    const llm = filmLLMDepsFromClient(agentCtx.client, agentCtx.model);
+    const llm = filmLLMDepsFromClient(agentCtx.client, agentCtx.model, {
+      activatedSkills: () => mergeActivatedSkillGuidance(
+        params.productionSkills?.("interactiveFilm") ?? [],
+        params.activeSkills?.() ?? [],
+      ),
+    });
     return createFilmAuthoringTools({
       projectRoot: params.projectRoot,
       projectId,
@@ -887,13 +919,25 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
 
   if (params.sessionKind === "play") {
     if (isConfirmed("play_start")) {
-      return [createPlayStartTool(params.pipeline, params.projectRoot, params.sessionId, params.playMode, { actionPayload: params.actionPayload })];
+      return [createPlayStartTool(params.pipeline, params.projectRoot, params.sessionId, params.playMode, {
+        actionPayload: params.actionPayload,
+        defaultSkills: params.productionSkills?.("play"),
+        activeSkills: params.activeSkills,
+      })];
     }
     if (params.playWorldExists) {
       return [
         createPlayEditTool(params.projectRoot, params.sessionId, lang),
-        createPlayReviseTool(params.pipeline, params.projectRoot, params.sessionId, { language: lang }),
-        createPlayStepTool(params.pipeline, params.projectRoot, params.sessionId, { language: lang }),
+        createPlayReviseTool(params.pipeline, params.projectRoot, params.sessionId, {
+          language: lang,
+          defaultSkills: params.productionSkills?.("play"),
+          activeSkills: params.activeSkills,
+        }),
+        createPlayStepTool(params.pipeline, params.projectRoot, params.sessionId, {
+          language: lang,
+          defaultSkills: params.productionSkills?.("play"),
+          activeSkills: params.activeSkills,
+        }),
         materialTool,
         materialRetrievalTool,
       ];
@@ -1085,8 +1129,8 @@ async function runAgentSessionUnlocked(
     const turnSkills = new Map<string, ActivatedSkillGuidance>(
       skillResolution.usedSkills.map((skill) => [skill.id, { skill, resources: [] }]),
     );
-    const longWritingSkill = skillResolution.availableSkills.find(
-      (skill) => skill.id === "inkos-long-writing",
+    const productionSkills = (capability: ProductionSkillCapability) => (
+      resolveProductionSkillActivations(skillResolution.availableSkills, capability)
     );
     const allowIntentSkillSelection = actionSource === "free-text"
       && skillResolution.forcedSkillIds.length === 0;
@@ -1120,11 +1164,12 @@ async function runAgentSessionUnlocked(
       intentSkillTool,
       requestedSkillIds: () => [...turnSkills.keys()],
       activeSkills: () => [...turnSkills.values()],
-      workerSkills: (agent) => (
-        longWritingSkill && agent !== "exporter"
-          ? [{ skill: longWritingSkill, resources: [] }]
-          : []
-      ),
+      workerSkills: (agent) => {
+        if (agent === "architect" || agent === "writer") return productionSkills("longWriting");
+        if (agent === "auditor" || agent === "reviser") return productionSkills("longReview");
+        return [];
+      },
+      productionSkills,
     });
     const agent = new Agent({
       initialState: {

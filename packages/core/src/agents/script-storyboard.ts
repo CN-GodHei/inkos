@@ -120,8 +120,6 @@ export function renderScriptSpec(input: ScriptCreationInput): string {
       "## Adaptation Boundaries",
       "- Preserve the characters, relationships, conflicts, key events, and taboos the user explicitly specified.",
       "- Never decide adaptation intensity (\"faithful adaptation / commercial punch-up / low-budget shoot\") on the user's behalf; execute only the spec the user has confirmed.",
-      "- If the source material is a novel, convert interiority into playable action, dialogue, evidence, objects, or on-screen consequences.",
-      "- If the target is a short drama, every episode needs visible conflict and an end-of-episode reason to keep watching.",
       "",
       "## Source Material Summary",
       summarizeSourceForSpec(input.sourceText, "en"),
@@ -142,8 +140,6 @@ export function renderScriptSpec(input: ScriptCreationInput): string {
     "## 改编边界",
     "- 优先保留用户明确指定的人物、关系、冲突、关键事件和禁忌。",
     "- 不替用户擅自决定“忠实改编 / 商业强化 / 低成本拍摄”等强度；只执行用户已确认的规格。",
-    "- 如果原素材是小说，内心戏要转成可演的动作、对白、证据、物件或场面后果。",
-    "- 如果目标是短剧，每集必须有可见冲突和集尾继续看的理由。",
     "",
     "## 源素材摘要",
     summarizeSourceForSpec(input.sourceText),
@@ -169,8 +165,6 @@ export function renderStoryboardSpec(input: StoryboardCreationInput): string {
       "",
       "## Storyboard Boundaries",
       "- A storyboard is a creative tool, not a locked-in shooting plan; the output must stay easy to discuss, extend, trim, and re-shoot.",
-      "- Each shot carries only what the frame can show, an actor can play, and a camera can express.",
-      "- Image prompts serve image generation: subject, action, shot size, setting, lighting, mood, and key props must be explicit.",
       "- Follow only the art style, format, composition, and visual constraints the user has confirmed; never turn unstated preferences into default hard constraints.",
       "",
       "## Source Material Summary",
@@ -192,8 +186,6 @@ export function renderStoryboardSpec(input: StoryboardCreationInput): string {
     "",
     "## 分镜边界",
     "- 分镜是创作工具，不替用户锁死最终拍法；输出要便于继续讨论、增删、改镜头。",
-    "- 每个镜头只写画面能看见、角色能演、镜头能表达的信息。",
-    "- 分镜图提示词服务图像生成：角色、动作、景别、场景、光线、情绪和关键道具要清楚。",
     "- 只遵循用户已确认的画风、格式、构图和视觉限制；用户没说的，不写成默认硬限制。",
     "",
     "## 源素材摘要",
@@ -208,6 +200,7 @@ export function renderInteractiveFilmSpec(input: InteractiveFilmCreationInput): 
       "",
       "## Goal",
       "- Deliverable: interactive film / interactive narrative game / film-game script",
+      "- Scope: story tree, variables/flags, playable node scripts, multiple endings, storyboards, and image assets",
       input.episodeCount
         ? `- Story segments/episodes: ${input.episodeCount}`
         : "- Story segments/episodes: unspecified; judge from the source material and user requirements",
@@ -227,10 +220,7 @@ export function renderInteractiveFilmSpec(input: InteractiveFilmCreationInput): 
       input.requirements?.trim() || "Not separately specified; follow the instruction the user confirmed.",
       "",
       "## Interactive Film Boundaries",
-      "- This is a creative deliverable, not a hard-numbers RPG engine design; variables, flags, relationships, and ending conditions must serve story branching.",
-      "- It must include branching storylines, key player choices, how variables/flags change later plot, and the conditions for reaching each of the multiple endings.",
-      "- Describe the variable system in natural language: states, relationships, secret/public status, evidence, items, identities, affinity/trust, and the like; never force fixed numeric stats or equipment tiers.",
-      "- The deliverable must fit interactive film/drama production: a clear story tree, shootable nodes, playable dialogue, drawable storyboards, and image prompts usable for asset generation.",
+      "- Do not impose RPG stats, combat formulas, equipment tiers, or any other mechanics the user did not request.",
       "- Never decide subject matter, budget, art style, or commercial punch-up intensity on the user's behalf; mark anything unspecified as adjustable.",
       "",
       "## Source Material Summary",
@@ -242,6 +232,7 @@ export function renderInteractiveFilmSpec(input: InteractiveFilmCreationInput): 
     "",
     "## 目标",
     "- 交付类型：互动影游 / 互动叙事类游戏 / 影游剧本",
+    "- 交付范围：剧情树、变量/旗标、可玩节点剧本、多结局、分镜与图片资产",
     input.episodeCount ? `- 剧情段落/集数：${input.episodeCount}` : "- 剧情段落/集数：未指定，按素材和用户要求判断",
     input.episodeDuration ? `- 单段/单集时长：${input.episodeDuration}` : "- 单段/单集时长：未指定",
     input.budget ? `- 预算约束：${input.budget}` : "- 预算约束：未指定",
@@ -253,10 +244,7 @@ export function renderInteractiveFilmSpec(input: InteractiveFilmCreationInput): 
     input.requirements?.trim() || "未单独指定；以用户确认时的 instruction 为准。",
     "",
     "## 互动影游边界",
-    "- 这是创作交付稿，不是硬数值 RPG 引擎设计；变量、旗标、关系和结局条件必须服务剧情分支。",
-    "- 必须包含多分支剧情、玩家关键选择、变量/旗标如何改变后续剧情，以及多结局达成条件。",
-    "- 变量系统用自然语言说明即可：状态、关系、隐瞒/公开、证据、物品、身份、好感/信任等；不要强行套固定数值或装备等级。",
-    "- 交付要适配影游/互动剧制作：剧情树清晰、节点可拍、对白可演、分镜可画、图片提示词可用于资产生成。",
+    "- 不擅自加入用户没有要求的 RPG 数值、战斗公式、装备等级或其他玩法系统。",
     "- 不替用户擅自决定题材、预算、画风和商业强化强度；未指定处写为可调整。",
     "",
     "## 源素材摘要",
@@ -337,19 +325,13 @@ function buildScriptCreationSystemPrompt(language: "zh" | "en" = "zh"): string {
   if (language === "en") {
     return [
       "You are a script-creation tool, not a novel-continuation engine.",
-      "Your job is to adapt a novel, concept, outline, or existing text into a script that production can keep working from, following the spec the user has confirmed.",
-      "Never decide adaptation intensity on the user's behalf; execute only the goals, format, boundaries, and constraints already confirmed in the spec.",
-      "Action lines carry only what the audience can see, an actor can play, and a camera can shoot; convert interiority into behavior, dialogue, objects, evidence, or on-screen consequences.",
-      "Dialogue must serve conflict, relationships, information flow, or emotional shifts; no hollow exposition.",
+      "Execute the confirmed creation spec and source material. Unconfirmed choices remain adjustable.",
       "Output Markdown. No process notes, no model self-narration, no \"Here is\" preamble.",
     ].join("\n");
   }
   return [
     "你是剧本创作工具，不是小说续写器。",
-    "你的任务是根据用户确认过的规格，把小说、创意、大纲或已有文本改成可继续制作的剧本。",
-    "不要替用户擅自决定改编强度；只执行规格里已经确认的目标、格式、边界和限制。",
-    "动作行只写观众能看见、演员能演、镜头能拍的信息；内心戏要转成行为、对白、物件、证据或场面后果。",
-    "对白要服务冲突、关系、信息推进或情绪变化，不写空泛解释。",
+    "执行用户确认的创作规格和源素材；未确认的选择保持可调整。",
     "输出 Markdown。不要写流程说明、模型自述或“以下是”。",
   ].join("\n");
 }
@@ -391,18 +373,12 @@ function buildScriptCreationUserPrompt(input: ScriptCreationInput, language: "zh
 function buildStoryboardCreationSystemPrompt(language: "zh" | "en" = "zh"): string {
   if (language === "en") {
     return [
-      "You are a storyboard-creation tool: you break a script, novel excerpt, or concept into shots that can be filmed, drawn, and fed to image generation.",
-      "A storyboard is not a plot summary; every shot needs a visual, character placement, action, shot size, or a visual focus.",
-      "Keep the visual spec the user has confirmed; never promote visual constraints the user did not confirm into default requirements.",
-      "Image prompts must be generation-ready: subject, action, setting, lighting, composition, mood, and key props all explicit.",
+      "You are a storyboard-creation tool. Execute the confirmed visual spec and source material; unconfirmed choices remain adjustable.",
       "Output Markdown. No model self-narration or process explanation.",
     ].join("\n");
   }
   return [
-    "你是分镜创作工具，负责把剧本、小说片段或创意拆成可拍、可画、可生图的分镜。",
-    "分镜不是剧情摘要；每个镜头都要有画面、角色位置、动作、景别或视觉重点。",
-    "保留用户确认的视觉规格；不要把用户没有确认的视觉限制写成默认要求。",
-    "图像提示词要便于生图：主体、动作、场景、光线、构图、情绪、关键道具明确。",
+    "你是分镜创作工具。执行用户确认的视觉规格和源素材；未确认的选择保持可调整。",
     "输出 Markdown。不要写模型自述或流程解释。",
   ].join("\n");
 }
@@ -453,17 +429,13 @@ function buildStoryboardCreationUserPrompt(input: StoryboardCreationInput, langu
 function buildInteractiveFilmCreationSystemPrompt(language: "zh" | "en" = "zh"): string {
   if (language === "en") {
     return [
-      "You are an interactive-film creation tool: you turn a concept, novel, script, or user brief into an interactive-film deliverable that production can build from.",
-      "An interactive film is not an ordinary script: it must have a story tree, key player choices, variables/flags, relationship/evidence/item states, and the conditions for reaching each of the multiple endings.",
-      "The variable system exists only to drive plot progression and branch unlocking; no default RPG stats, combat formulas, or equipment tiers. Write such rules only when the user explicitly asks for them.",
+      "You are an interactive-film creation tool. Execute the confirmed spec and source material; unconfirmed choices remain adjustable.",
       "Output must be Markdown with the specified sections. No model self-narration, process notes, or \"Here is\" preamble.",
       "Every storyboard image prompt must be its own standalone `Prompt: ...` line so downstream asset management can pick it up; include only the visual constraints the user has confirmed.",
     ].join("\n");
   }
   return [
-    "你是互动影游创作工具，负责把创意、小说、剧本或用户需求整理成可制作的互动影游交付稿。",
-    "互动影游不是普通剧本：必须有剧情树、关键选择、变量/旗标、关系/证据/物品状态、多结局达成条件。",
-    "变量系统只服务剧情推进和分支解锁，不要默认 RPG 数值、战斗公式或装备等级；只有用户明确要求时才写对应规则。",
+    "你是互动影游创作工具。执行用户确认的规格和源素材；未确认的选择保持可调整。",
     "输出必须是 Markdown，包含指定小节。不要写模型自述、流程说明或“以下是”。",
     "分镜图提示词必须写成单独的 `Prompt: ...` 行，便于后续资产管理；只写用户确认过的视觉限制。",
   ].join("\n");

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ToolExecution } from "../../../store/chat/types";
-import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getChapterContextTraceDetails, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
+import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getChapterContextTraceDetails, getExecutionSkillIds, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
 import { usePreferencesStore } from "../../../store/preferences";
 import { setAppLanguage } from "../../../lib/app-language";
 
@@ -221,6 +221,24 @@ describe("groupChronologically", () => {
     expect(html).toContain("story/author_intent.md");
     expect(html).toContain("runtime/chapter-0008.trace.json");
     expect(html).toContain("语义压缩");
+  });
+
+  it("shows the actual professional Skill for non-chapter production tools", () => {
+    const exec = makeExec({
+      id: "play-skilled",
+      tool: "play_step",
+      label: "推进互动世界",
+      details: {
+        kind: "play_turn_advanced",
+        sceneText: "雨雾里的钟声停了一拍。",
+        skillIds: ["inkos-play-world"],
+      },
+    });
+
+    expect(getExecutionSkillIds(exec)).toEqual(["inkos-play-world"]);
+    const html = renderToStaticMarkup(React.createElement(ToolExecutionSteps, { executions: [exec] }));
+    expect(html).toContain("专业 Skill");
+    expect(html).toContain("inkos-play-world");
   });
 
   it("extracts generated cover details from public short fiction tools", () => {

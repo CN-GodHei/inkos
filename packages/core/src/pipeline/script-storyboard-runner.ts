@@ -376,7 +376,7 @@ async function createInteractiveFilmStoryGraph(
       projectId: args.projectId,
       title: args.title,
       premise: buildInteractiveFilmGraphPremise(args.input, args.storyTree, args.flags, args.script, args.imagePrompts),
-    });
+    }, { language: args.input.language, activatedSkills: runtime.activatedSkills });
   } catch (error) {
     args.onProgress?.(`Story graph JSON generation failed; writing a minimal playable graph. ${formatError(error)}`);
     return buildFallbackStoryGraph(args.projectId, args.title, args.input, args.imagePrompts);

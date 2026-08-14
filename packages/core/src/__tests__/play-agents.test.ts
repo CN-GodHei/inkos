@@ -177,7 +177,7 @@ describe("play agents", () => {
     }
   });
 
-  it("mutator prompt keeps each player action to one adjacent beat instead of jumping ahead", async () => {
+  it("keeps beat-writing methodology out of the mutator protocol prompt", async () => {
     const agent = new PlayWorldMutatorAgent(ctx);
     const chat = vi.spyOn(agent as unknown as { chat: PlayWorldMutatorAgent["chat"] }, "chat").mockResolvedValue({
       content: JSON.stringify({ eventId: "evt-1", turn: 1, actionKind: "do" }),
@@ -193,23 +193,22 @@ describe("play agents", () => {
 
     const messages = chat.mock.calls[0]?.[0] as ReadonlyArray<{ readonly role: string; readonly content: string }>;
     const system = messages.find((message) => message.role === "system")?.content ?? "";
-    expect(system).toContain("只推进相邻一拍");
-    expect(system).toContain("不要替玩家越过过程");
+    expect(system).not.toContain("只推进相邻一拍");
+    expect(system).not.toContain("不要替玩家越过过程");
+    expect(system).toContain("PlayMutation");
   });
 
   it("renderer treats player negation and applied time as canonical", async () => {
     const prompt = buildSceneRendererSystemPrompt("open", "zh");
-    expect(prompt).toContain("玩家原话里的否定动作");
-    expect(prompt).toContain("没有触碰");
     expect(prompt).toContain("elapsed 和 anchor 是权威时间");
     expect(prompt).toContain("不得另写");
   });
 
-  it("renderer bridges from the player's action instead of jumping to an epilogue", () => {
+  it("leaves scene-writing methodology to the Play Skill", () => {
     const prompt = buildSceneRendererSystemPrompt("open", "zh");
-    expect(prompt).toContain("先承接玩家动作");
-    expect(prompt).toContain("不要直接跳到动作完成后");
-    expect(prompt).toContain("不要写总结性尾声");
+    expect(prompt).not.toContain("先承接玩家动作");
+    expect(prompt).not.toContain("不要写总结性尾声");
+    expect(prompt).toContain("suggestedActions");
   });
 
   it("renders the applied state as prose plus suggested actions", async () => {
@@ -350,11 +349,10 @@ describe("scene renderer prompt by mode", () => {
     expect(prompt).not.toMatch(/必须给 2-4|每回合都要给/);
   });
 
-  it("允许'在场'回合并让世界自走、不催玩家行动", () => {
+  it("keeps runtime time authority while leaving world-progression craft to the Skill", () => {
     const prompt = buildSceneRendererSystemPrompt("guided");
-    expect(prompt).toContain("呼吸"); // presence is a valid, breathing turn
-    expect(prompt).toContain("世界不是死的"); // world runs on its own clock
-    expect(prompt).toContain("时间段"); // applied timeAdvance is rendered as world synchronization
+    expect(prompt).not.toContain("世界不是死的");
+    expect(prompt).toContain("时间段");
   });
 
   it("renderer treats applied typed state as the source of concrete facts", () => {

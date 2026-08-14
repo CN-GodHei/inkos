@@ -71,6 +71,32 @@ describe("storyboard creation runner", () => {
     ]);
   });
 
+  it("applies storyboard-specific Skill guidance without reusing the long-writing Skill", async () => {
+    const runtime = makeRuntime(root, [{
+      skill: {
+        id: "inkos-storyboard",
+        name: "Storyboard creation",
+        description: "Visual shot design.",
+        body: "Translate narrative beats into visible shots.",
+        source: "builtin",
+      },
+      resources: [],
+    }]);
+
+    await runStoryboardCreation({
+      projectRoot: root,
+      runtime,
+      title: "冷库账页",
+      instruction: "把小说片段拆成分镜。",
+      projectId: "cold-ledger-skilled",
+    });
+
+    const messages = chatCompletionMock.mock.calls[0]?.[2] as ReadonlyArray<{ role: string; content: string }>;
+    expect(messages[0]?.content).toContain("inkos-storyboard");
+    expect(messages[0]?.content).toContain("Translate narrative beats into visible shots.");
+    expect(messages[0]?.content).not.toContain("inkos-long-writing");
+  });
+
   it("writes interactive-film story tree, flags, script, storyboard, prompts, and image assets", async () => {
     chatCompletionMock.mockResolvedValueOnce({
       content: [
@@ -348,7 +374,7 @@ describe("storyboard creation runner", () => {
   });
 });
 
-function makeRuntime(root: string): AgentContext {
+function makeRuntime(root: string, activatedSkills?: AgentContext["activatedSkills"]): AgentContext {
   return {
     projectRoot: root,
     model: "test-model",
@@ -363,5 +389,6 @@ function makeRuntime(root: string): AgentContext {
         extra: {},
       },
     },
+    activatedSkills,
   };
 }

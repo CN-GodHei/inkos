@@ -46,7 +46,10 @@ const REPLAY_RESULT: PlayReplayResult = {
 };
 
 function pipelineStub() {
-  return { createAgentContext: vi.fn(() => ({})) } as any;
+  return {
+    createAgentContext: vi.fn(() => ({})),
+    runWithAgentContext: vi.fn(async (_context: unknown, task: () => Promise<unknown>) => task()),
+  } as any;
 }
 
 describe("agent play tools", () => {
@@ -218,13 +221,16 @@ describe("agent play tools", () => {
   it("runs opening seeding inside the abort scope and does not swallow user cancellation", async () => {
     const sessionId = "1700000000000-abort1";
     const controller = new AbortController();
-    const runWithAbortSignal = vi.fn(async (signal: AbortSignal | undefined, task: () => Promise<unknown>) => {
-      signal?.throwIfAborted();
+    const runWithAgentContext = vi.fn(async (
+      context: { readonly signal?: AbortSignal },
+      task: () => Promise<unknown>,
+    ) => {
+      context.signal?.throwIfAborted();
       return task();
     });
     const pipeline = {
       createAgentContext: vi.fn(() => ({})),
-      runWithAbortSignal,
+      runWithAgentContext,
     };
     const seedOpening = vi.fn(async () => null);
     const tool = createPlayStartTool(pipeline as never, root, sessionId, undefined, {
@@ -237,7 +243,10 @@ describe("agent play tools", () => {
       initialScene: "档案柜里只有一张无名婴儿照片。",
     }, controller.signal);
 
-    expect(runWithAbortSignal).toHaveBeenCalledWith(controller.signal, expect.any(Function));
+    expect(runWithAgentContext).toHaveBeenCalledWith(
+      { signal: controller.signal, activatedSkills: [] },
+      expect.any(Function),
+    );
 
     const cancelledSessionId = "1700000000000-abort2";
     const cancelled = new AbortController();
@@ -278,6 +287,44 @@ describe("agent play tools", () => {
       worldId: sessionId,
       runId: "main",
       sceneText: "你翻开账本，发现最后一页夹着一张旧船票。",
+    });
+  });
+
+  it("runs Play inside its own professional Skill context", async () => {
+    const sessionId = "1700000000000-skilled";
+    const store = new PlayStore(root);
+    await store.createWorld({
+      id: sessionId,
+      title: "雾港",
+      premise: "玩家追查失踪的引航员。",
+      mode: "open",
+    });
+    await store.ensureRun(sessionId, "main");
+    const pipeline = pipelineStub();
+    const playSkill = {
+      skill: {
+        id: "inkos-play-world",
+        name: "Interactive world play",
+        description: "Play method.",
+        body: "Advance one adjacent dramatic beat.",
+        source: "builtin" as const,
+      },
+      resources: [],
+    };
+    const tool = createPlayStepTool(pipeline, root, sessionId, {
+      defaultSkills: [playSkill],
+      runnerFactory: () => ({ step: vi.fn(async () => STEP_RESULT) }),
+    });
+
+    const result = await tool.execute("tc-step-skilled", { input: "检查码头绳结" });
+
+    expect(pipeline.runWithAgentContext).toHaveBeenCalledWith(
+      { signal: undefined, activatedSkills: [playSkill] },
+      expect.any(Function),
+    );
+    expect(result.details).toMatchObject({
+      kind: "play_turn_advanced",
+      skillIds: ["inkos-play-world"],
     });
   });
 

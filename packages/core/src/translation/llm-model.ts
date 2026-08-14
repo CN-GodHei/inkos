@@ -1,14 +1,17 @@
 import { chatCompletion, type LLMClient } from "../llm/provider.js";
+import { appendActivatedSkillGuidance } from "../agents/base.js";
+import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import type { TranslationGlossaryTerm, TranslationModelPort, TranslationSegment } from "./types.js";
 
 export function createLLMTranslationModel(input: {
   readonly client: LLMClient;
   readonly model: string;
   readonly maxTokens?: number;
+  readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
 }): TranslationModelPort {
   return {
     async translateSegments(request) {
-      const response = await chatCompletion(input.client, input.model, [
+      const response = await chatCompletion(input.client, input.model, appendActivatedSkillGuidance([
         {
           role: "system",
           content: [
@@ -32,7 +35,7 @@ export function createLLMTranslationModel(input: {
             })),
           }, null, 2),
         },
-      ], { temperature: 0.2, maxTokens: input.maxTokens ?? 8192 });
+      ], input.activatedSkills), { temperature: 0.2, maxTokens: input.maxTokens ?? 8192 });
       const parsed = parseJsonObject(response.content);
       return {
         segments: parseTranslatedSegments(parsed.segments, request.segments),
@@ -40,7 +43,7 @@ export function createLLMTranslationModel(input: {
       };
     },
     async reviewChapter(request) {
-      const response = await chatCompletion(input.client, input.model, [
+      const response = await chatCompletion(input.client, input.model, appendActivatedSkillGuidance([
         {
           role: "system",
           content: [
@@ -63,7 +66,7 @@ export function createLLMTranslationModel(input: {
             })),
           }, null, 2),
         },
-      ], { temperature: 0.1, maxTokens: 4096 });
+      ], input.activatedSkills), { temperature: 0.1, maxTokens: 4096 });
       const parsed = parseJsonObject(response.content);
       return {
         passed: parsed.passed === true,

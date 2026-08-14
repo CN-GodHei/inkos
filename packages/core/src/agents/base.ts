@@ -118,7 +118,7 @@ export abstract class BaseAgent {
   abstract get name(): string;
 }
 
-function appendActivatedSkillGuidance(
+export function appendActivatedSkillGuidance(
   messages: ReadonlyArray<LLMMessage>,
   activations: ReadonlyArray<ActivatedSkillGuidance> | undefined,
 ): ReadonlyArray<LLMMessage> {

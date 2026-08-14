@@ -1,4 +1,6 @@
 import { chatCompletion, type LLMClient } from "../llm/provider.js";
+import { appendActivatedSkillGuidance } from "../agents/base.js";
+import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { StoryGraphSchema, type StoryGraph } from "./graph-schema.js";
 
 const GRAPH_JSON_SHAPE = `{"schemaVersion":1,"projectId":"","title":"","variables":[{"name":"","type":"flag|counter|relationship|item","default":0,"desc":""}],"nodes":[{"id":"","title":"","type":"start|normal|branch|ending","sceneDesc":"","dialogue":[{"speaker":"","text":"","emotion":""}],"choices":[{"id":"","text":"","targetNodeId":"","condition":{"var":"","op":">=","value":0},"effects":[{"var":"","op":"add","value":1}]}]}],"endings":[{"id":"","nodeId":"","title":"","type":"good|bad|neutral|secret","description":""}]}`;
@@ -43,16 +45,20 @@ export async function generateStoryGraph(
   client: LLMClient,
   model: string,
   input: GenerateStoryGraphInput,
-  options?: { readonly maxTokens?: number; readonly language?: "zh" | "en" },
+  options?: {
+    readonly maxTokens?: number;
+    readonly language?: "zh" | "en";
+    readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
+  },
 ): Promise<StoryGraph> {
   const language = options?.language ?? "zh";
   const systemPrompt = language === "en" ? SYSTEM_PROMPT_EN : SYSTEM_PROMPT_ZH;
   const userPrompt = language === "en"
     ? `Title: ${input.title}\nPremise: ${input.premise}`
     : `标题：${input.title}\n前提：${input.premise}`;
-  const res = await chatCompletion(client, model, [
+  const res = await chatCompletion(client, model, appendActivatedSkillGuidance([
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
-  ], { temperature: 0.5, maxTokens: options?.maxTokens ?? 8000 });
+  ], options?.activatedSkills), { temperature: 0.5, maxTokens: options?.maxTokens ?? 8000 });
   return buildStoryGraphFromLLMText(res.content, input.projectId);
 }

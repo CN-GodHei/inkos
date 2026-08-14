@@ -935,6 +935,7 @@ describe("runAgentSession cache — bookId switch", () => {
   it("treats successful production tool results as terminal for the current turn", async () => {
     const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
     const pipeline = {
+      runWithAgentContext: vi.fn(async (_context: unknown, task: () => Promise<unknown>) => task()),
       writeNextChapter: vi.fn(async () => ({
         chapterNumber: 1,
         title: "第一章",

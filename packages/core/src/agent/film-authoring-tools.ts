@@ -19,6 +19,8 @@ import { MemoryDB } from "../state/memory-db.js";
 import { join } from "node:path";
 import { generateNodeImage, defaultNodeImageDeps, type NodeImageDeps } from "../interactive-film/node-image.js";
 import { appendPromptPackGuidance } from "../prompts/prompt-pack.js";
+import { appendActivatedSkillGuidance } from "../agents/base.js";
+import type { ActivatedSkillGuidance } from "./skill-tool.js";
 
 // ---------------------------------------------------------------------------
 // Local helper — textResult is not exported from agent-tools.ts
@@ -168,14 +170,19 @@ export function createUpsertCharactersTool(projectRoot: string, projectId: strin
 
 export interface FilmLLMDeps {
   readonly chat: (system: string, user: string) => Promise<string>;
+  readonly skillIds?: () => ReadonlyArray<string>;
 }
 
-function defaultChat(client: LLMClient, model: string): FilmLLMDeps["chat"] {
+function defaultChat(
+  client: LLMClient,
+  model: string,
+  activatedSkills?: () => ReadonlyArray<ActivatedSkillGuidance>,
+): FilmLLMDeps["chat"] {
   return async (system, user) => {
-    const res = await chatCompletion(client, model, [
+    const res = await chatCompletion(client, model, appendActivatedSkillGuidance([
       { role: "system", content: system },
       { role: "user", content: user },
-    ], { temperature: 0.6, maxTokens: 4000 });
+    ], activatedSkills?.()), { temperature: 0.6, maxTokens: 4000 });
     return res.content;
   };
 }
@@ -226,7 +233,9 @@ export function createFillNodeTool(
         : `${context}\n\n要填的节点 id：${params.nodeId}\n指令：${params.instruction}`;
       const text = await deps.chat(systemPrompt, userPrompt);
       const { rev } = await applyGraphDelta({ projectRoot, projectId, delta: buildFillNodeDeltaFromLLMText(text, params.nodeId), phase: "workshop" });
-      return textResult(`Node ${params.nodeId} filled (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.script"));
+      return textResult(`Node ${params.nodeId} filled (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.script", {
+        skillIds: deps.skillIds?.() ?? [],
+      }));
     },
   };
 }
@@ -255,13 +264,22 @@ export function createReviseNodeTool(
         : `${context}\n\n要修改的节点 id：${params.nodeId}\n现有内容：${JSON.stringify(current ?? {})}\n修改指令：${params.instruction}`;
       const text = await deps.chat(systemPrompt, userPrompt);
       const { rev } = await applyGraphDelta({ projectRoot, projectId, delta: buildFillNodeDeltaFromLLMText(text, params.nodeId), phase: "workshop" });
-      return textResult(`Node ${params.nodeId} revised (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.script"));
+      return textResult(`Node ${params.nodeId} revised (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.script", {
+        skillIds: deps.skillIds?.() ?? [],
+      }));
     },
   };
 }
 
-export function filmLLMDepsFromClient(client: LLMClient, model: string): FilmLLMDeps {
-  return { chat: defaultChat(client, model) };
+export function filmLLMDepsFromClient(
+  client: LLMClient,
+  model: string,
+  options: { readonly activatedSkills?: () => ReadonlyArray<ActivatedSkillGuidance> } = {},
+): FilmLLMDeps {
+  return {
+    chat: defaultChat(client, model, options.activatedSkills),
+    skillIds: () => (options.activatedSkills?.() ?? []).map((activation) => activation.skill.id),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +316,9 @@ export function createDraftStructureTool(
         : `${context}\n\n骨架指令：${params.instruction}`;
       const text = await deps.chat(systemPrompt, userPrompt);
       const { graph: next, rev } = await applyGraphDelta({ projectRoot, projectId, delta: buildStructureDeltaFromLLMText(text), phase: "structure" });
-      return textResult(`Structure drafted: ${next.nodes.length} nodes (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.story-graph"));
+      return textResult(`Structure drafted: ${next.nodes.length} nodes (rev ${rev}).`, graphUpdatedDetails(rev, "interactive-film.story-graph", {
+        skillIds: deps.skillIds?.() ?? [],
+      }));
     },
   };
 }

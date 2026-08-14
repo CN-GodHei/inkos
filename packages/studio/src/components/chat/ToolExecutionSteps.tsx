@@ -114,6 +114,7 @@ export interface GeneratedArtifactDetails {
   readonly flagsPath?: string;
   readonly imagePromptsPath?: string;
   readonly assetsManifestPath?: string;
+  readonly skillIds?: ReadonlyArray<string>;
 }
 
 export interface PlayToolDetails {
@@ -126,6 +127,7 @@ export interface PlayToolDetails {
   readonly sceneText?: string;
   readonly suggestedActions?: readonly string[];
   readonly variantId?: string;
+  readonly skillIds?: ReadonlyArray<string>;
 }
 
 export interface PlayEditDetails {
@@ -200,6 +202,26 @@ function rawStringArrayField(record: Record<string, unknown>, key: string): stri
     .filter(Boolean);
 }
 
+export function getExecutionSkillIds(exec: ToolExecution): ReadonlyArray<string> {
+  if (!exec.details || typeof exec.details !== "object" || Array.isArray(exec.details)) return [];
+  return rawStringArrayField(exec.details as Record<string, unknown>, "skillIds");
+}
+
+function SkillUsagePreview({ exec }: { exec: ToolExecution }) {
+  const skills = getExecutionSkillIds(exec);
+  if (skills.length === 0) return null;
+  return (
+    <div className="mx-3 mb-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+      <span className="font-semibold text-foreground/80">{tr("专业 Skill", "Professional skills")}</span>
+      {skills.map((skill) => (
+        <span key={skill} className="rounded-full border border-border/50 bg-background/60 px-2 py-0.5 font-mono text-[11px]">
+          {skill}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 interface ChapterContextTraceDetails {
   readonly chapterNumber?: number;
   readonly tracePath: string;
@@ -264,15 +286,9 @@ export function getChapterContextTraceDetails(exec: ToolExecution): ReadonlyArra
 function ChapterContextTracePreview({ exec }: { exec: ToolExecution }) {
   const traces = getChapterContextTraceDetails(exec);
   if (traces.length === 0) return null;
-  const skills = exec.details && typeof exec.details === "object" && !Array.isArray(exec.details)
-    ? rawStringArrayField(exec.details as Record<string, unknown>, "skillIds")
-    : [];
   return (
     <div className="mx-3 mb-3 mt-1 rounded-xl border border-border/50 bg-background/55 px-3 py-2.5 text-xs">
       <div className="font-semibold text-foreground">{tr("本轮参考依据", "Context used this turn")}</div>
-      {skills.length > 0 && (
-        <div className="mt-1 text-muted-foreground">{tr("Skill", "Skills")}: {skills.join(" · ")}</div>
-      )}
       <div className="mt-2 space-y-2">
         {traces.map((trace) => (
           <details key={`${trace.chapterNumber ?? 0}:${trace.tracePath}`} className="rounded-lg border border-border/40 px-2.5 py-2">
@@ -350,6 +366,7 @@ export function getGeneratedArtifactDetails(exec: ToolExecution): GeneratedArtif
     flagsPath: stringField(record, "flagsPath"),
     imagePromptsPath: stringField(record, "imagePromptsPath"),
     assetsManifestPath: stringField(record, "assetsManifestPath"),
+    skillIds: stringArrayField(record, "skillIds"),
   };
 }
 
@@ -476,6 +493,7 @@ export function getPlayToolDetails(exec: ToolExecution): PlayToolDetails | null 
     sceneText: stringField(record, "sceneText"),
     suggestedActions: suggested,
     variantId: stringField(record, "variantId"),
+    skillIds: stringArrayField(record, "skillIds"),
   };
 }
 
@@ -848,6 +866,7 @@ function PipelineExecution({
         onProposedAction={onProposedAction}
         onRejectProposedAction={onRejectProposedAction}
       />
+      <SkillUsagePreview exec={exec} />
       <ShortFictionResultPreview exec={exec} />
       <ScriptStoryboardResultPreview exec={exec} onOpenFilmStudio={onOpenFilmStudio} />
       <PlayResultPreview exec={exec} />

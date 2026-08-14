@@ -206,11 +206,14 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
       pipelineConfigs.push(config);
     }
 
-    // 与真实 PipelineRunner.runWithAbortSignal 行为一致（入口检查一次 signal），
-    // 并把 signal 记录下来供测试断言"任务控制器的中止信号传进了写作流程"。
-    runWithAbortSignal = vi.fn(async (signal: AbortSignal | undefined, task: () => Promise<unknown>) => {
-      pipelineAbortSignals.push(signal);
-      signal?.throwIfAborted();
+    // Match the shared execution context used by production tools and record
+    // the signal so cancellation tests can assert it reached the pipeline.
+    runWithAgentContext = vi.fn(async (
+      context: { readonly signal?: AbortSignal },
+      task: () => Promise<unknown>,
+    ) => {
+      pipelineAbortSignals.push(context.signal);
+      context.signal?.throwIfAborted();
       return task();
     });
 
@@ -350,6 +353,9 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     createSkillRegistry: actual.createSkillRegistry,
     loadConfiguredAgentSkills: actual.loadConfiguredAgentSkills,
     loadAvailableAgentSkills: actual.loadAvailableAgentSkills,
+    activatedSkillIds: actual.activatedSkillIds,
+    mergeActivatedSkillGuidance: actual.mergeActivatedSkillGuidance,
+    resolveProductionSkillActivations: actual.resolveProductionSkillActivations,
     createTranslationCreateTool: actual.createTranslationCreateTool,
     createLLMTranslationModel: createLLMTranslationModelMock,
     createTranslationProjectFromFile: actual.createTranslationProjectFromFile,
@@ -3242,7 +3248,68 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(createShortFictionRunToolMock).toHaveBeenCalledWith(
       expect.anything(),
       root,
-      expect.objectContaining({ language: "en" }),
+      expect.objectContaining({
+        language: "en",
+        defaultSkills: [expect.objectContaining({
+          skill: expect.objectContaining({ id: "inkos-short-writing" }),
+        })],
+      }),
+    );
+  });
+
+  it("merges a forced project Skill into the mode-specific Skill for confirmed production", async () => {
+    await mkdir(join(root, ".agents", "skills", "evidence-tone"), { recursive: true });
+    await writeFile(
+      join(root, ".agents", "skills", "evidence-tone", "SKILL.md"),
+      [
+        "---",
+        "name: evidence-tone",
+        "description: Keep the requested evidence-driven tone.",
+        "---",
+        "# Evidence tone",
+        "Make every reversal depend on visible evidence.",
+      ].join("\n"),
+      "utf-8",
+    );
+    const shortSession = {
+      sessionId: "short-forced-skill-session",
+      bookId: null,
+      sessionKind: "short",
+      title: null,
+      messages: [],
+      events: [],
+      draftRounds: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    loadBookSessionMock.mockResolvedValue(shortSession);
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "写一篇证据驱动的短篇。",
+        sessionId: shortSession.sessionId,
+        sessionKind: "short",
+        actionSource: "button",
+        requestedIntent: "short_run",
+        requestedSkills: ["evidence-tone"],
+        actionPayload: { shortRun: { direction: "旧账本悬疑", cover: false } },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(createShortFictionRunToolMock).toHaveBeenCalledWith(
+      expect.anything(),
+      root,
+      expect.objectContaining({
+        defaultSkills: expect.arrayContaining([
+          expect.objectContaining({ skill: expect.objectContaining({ id: "inkos-short-writing" }) }),
+          expect.objectContaining({ skill: expect.objectContaining({ id: "evidence-tone" }) }),
+        ]),
+      }),
     );
   });
 
@@ -4352,6 +4419,7 @@ describe("createStudioServer daemon lifecycle", () => {
             tool: "play_start",
             status: "completed",
             result: "暴雨敲着铁皮门，封存档案箱压在门口。",
+            details: expect.objectContaining({ skillIds: ["inkos-play-world"] }),
           }),
         ],
       },
@@ -4713,7 +4781,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     expect(abortResponse.status).toBe(200);
     await expect(abortResponse.json()).resolves.toMatchObject({ aborted: true });
-    // 任务控制器的中止信号已经通过 pipeline.runWithAbortSignal 传给了写章流程
+    // 任务控制器的中止信号已经通过统一 AgentContext 传给了写章流程
     expect(pipelineAbortSignals.at(-1)?.aborted).toBe(true);
 
     // 真实 pipeline 会在下一个检查点抛出中止错误，这里手动模拟这次拒绝

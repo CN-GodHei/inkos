@@ -69,6 +69,9 @@ import {
   ingestMaterial,
   createSkillRegistry,
   loadAvailableAgentSkills,
+  activatedSkillIds,
+  mergeActivatedSkillGuidance,
+  resolveProductionSkillActivations,
   parseAgentSkillDocument,
   getBuiltinPrompt,
   listBuiltinPromptPacks,
@@ -1273,13 +1276,14 @@ function buildWriteNextResponseText(
   return pick(lang, zhResponseText, enResponseText);
 }
 
-// 写下一章的确认式任务工具：走 pipeline.runWithAbortSignal，让任务控制器的
-// 中止信号传进写作流程（pipeline 在下一个检查点抛出中止错误）。
+// 写下一章的确认式任务工具：复用生产工具的 AgentContext，让取消信号与
+// 专业 Skill 同时贯穿写作流程（pipeline 在下一个检查点抛出中止错误）。
 function createWriteNextChapterTool(
   pipeline: PipelineRunner,
   bookId: string,
   lang: StudioLanguage,
   chapterCount = 1,
+  activatedSkills: ReturnType<typeof resolveProductionSkillActivations> = [],
 ): {
   readonly name: "sub_agent";
   readonly execute: (
@@ -1303,8 +1307,8 @@ function createWriteNextChapterTool(
             ),
           }],
         });
-        const results = await pipeline.runWithAbortSignal(
-          signal,
+        const results = await pipeline.runWithAgentContext(
+          { signal, activatedSkills },
           () => pipeline.writeChapters(bookId, chapterCount, {
             onChapterComplete(result, completedCount, requestedCount) {
               onUpdate?.({
@@ -1348,6 +1352,7 @@ function createWriteNextChapterTool(
               status: result.status,
             })),
             ...(stoppedStatus ? { stoppedStatus } : {}),
+            skillIds: activatedSkillIds(activatedSkills),
           },
         };
       }
@@ -1357,7 +1362,10 @@ function createWriteNextChapterTool(
           text: pick(lang, `正在为 ${bookId} 写下一章…`, `Writing the next chapter for ${bookId}...`),
         }],
       });
-      const writeResult = await pipeline.runWithAbortSignal(signal, () => pipeline.writeNextChapter(bookId));
+      const writeResult = await pipeline.runWithAgentContext(
+        { signal, activatedSkills },
+        () => pipeline.writeNextChapter(bookId),
+      );
       const writeNeedsReview = Boolean(writeResult.status && writeResult.status !== "ready-for-review");
       return {
         ...(writeNeedsReview ? { isError: true } : {}),
@@ -1369,6 +1377,7 @@ function createWriteNextChapterTool(
           title: writeResult.title,
           wordCount: writeResult.wordCount,
           status: writeResult.status,
+          skillIds: activatedSkillIds(activatedSkills),
         },
       };
     },
@@ -1384,6 +1393,8 @@ async function executeConfirmedProductionAction(args: {
   readonly instruction: string;
   readonly requestedIntent: RequestedIntent;
   readonly actionPayload?: ActionPayload;
+  readonly requestedSkills?: ReadonlyArray<string>;
+  readonly disabledSkills?: ReadonlyArray<string>;
   readonly playMode?: PlayMode;
   readonly language?: StudioLanguage;
   readonly taskId: string;
@@ -1394,6 +1405,18 @@ async function executeConfirmedProductionAction(args: {
   const lang = args.language ?? "zh";
   const id = args.taskId;
   const actionPayload = args.actionPayload;
+  const configuredSkills = await loadAvailableAgentSkills({ projectRoot: args.root });
+  const skillResolution = createSkillRegistry({ skills: configuredSkills.skills }).resolveSkills({
+    requestedSkills: args.requestedSkills,
+    disabledSkills: args.disabledSkills,
+  });
+  const requestedSkillActivations = skillResolution.usedSkills.map((skill) => ({ skill, resources: [] }));
+  const productionSkills = (
+    capability: Parameters<typeof resolveProductionSkillActivations>[1],
+  ) => mergeActivatedSkillGuidance(
+    resolveProductionSkillActivations(skillResolution.availableSkills, capability),
+    requestedSkillActivations,
+  );
   let tool: ReturnType<typeof createSubAgentTool>
     | ReturnType<typeof createShortFictionRunTool>
     | ReturnType<typeof createGenerateCoverTool>
@@ -1412,7 +1435,10 @@ async function executeConfirmedProductionAction(args: {
   if (args.requestedIntent === "create_book") {
     const payload = actionPayload?.createBook;
     const title = requirePayloadText(payload?.title, pick(lang, "确认建书缺少书名，请重新生成确认卡。", "The book creation confirmation is missing a title. Regenerate the confirmation card."));
-    tool = createSubAgentTool(args.pipeline, null, args.root, { actionPayload });
+    tool = createSubAgentTool(args.pipeline, null, args.root, {
+      actionPayload,
+      workerSkills: (worker) => worker === "architect" ? productionSkills("longWriting") : [],
+    });
     agent = "architect";
     params = {
       agent,
@@ -1428,7 +1454,11 @@ async function executeConfirmedProductionAction(args: {
     const payload = actionPayload?.shortRun;
     const direction = payload?.direction?.trim() || args.instruction.trim();
     if (!direction) throw new ApiError(400, "CONFIRMED_ACTION_PAYLOAD_INCOMPLETE", pick(lang, "确认短篇缺少方向，请重新生成确认卡。", "The short fiction confirmation is missing a direction. Regenerate the confirmation card."));
-    tool = createShortFictionRunTool(args.pipeline, args.root, { actionPayload, language: lang });
+    tool = createShortFictionRunTool(args.pipeline, args.root, {
+      actionPayload,
+      language: lang,
+      defaultSkills: productionSkills("shortWriting"),
+    });
     params = {
       direction,
       ...(payload?.reference ? { reference: payload.reference } : {}),
@@ -1442,7 +1472,13 @@ async function executeConfirmedProductionAction(args: {
       throw new ApiError(400, "BOOK_ID_REQUIRED", pick(lang, "写下一章需要先打开一本书。", "Writing the next chapter requires an active book."));
     }
     const chapterCount = actionPayload?.writeNext?.chapterCount ?? 1;
-    tool = createWriteNextChapterTool(args.pipeline, args.bookId, lang, chapterCount);
+    tool = createWriteNextChapterTool(
+      args.pipeline,
+      args.bookId,
+      lang,
+      chapterCount,
+      productionSkills("longWriting"),
+    );
     agent = "writer";
     params = { agent: "writer", bookId: args.bookId };
   } else if (args.requestedIntent === "generate_cover") {
@@ -1459,7 +1495,11 @@ async function executeConfirmedProductionAction(args: {
   } else if (args.requestedIntent === "script_create") {
     const payload = actionPayload?.scriptCreate;
     const title = requirePayloadText(payload?.title, pick(lang, "确认创建剧本缺少标题，请重新生成确认卡。", "The script creation confirmation is missing a title. Regenerate the confirmation card."));
-    tool = createScriptCreationTool(args.pipeline, args.root, { actionPayload, language: lang });
+    tool = createScriptCreationTool(args.pipeline, args.root, {
+      actionPayload,
+      language: lang,
+      defaultSkills: productionSkills("script"),
+    });
     params = {
       title,
       instruction: args.instruction,
@@ -1476,7 +1516,11 @@ async function executeConfirmedProductionAction(args: {
   } else if (args.requestedIntent === "storyboard_create") {
     const payload = actionPayload?.storyboardCreate;
     const title = requirePayloadText(payload?.title, pick(lang, "确认创建分镜缺少标题，请重新生成确认卡。", "The storyboard creation confirmation is missing a title. Regenerate the confirmation card."));
-    tool = createStoryboardCreationTool(args.pipeline, args.root, { actionPayload, language: lang });
+    tool = createStoryboardCreationTool(args.pipeline, args.root, {
+      actionPayload,
+      language: lang,
+      defaultSkills: productionSkills("storyboard"),
+    });
     params = {
       title,
       instruction: args.instruction,
@@ -1494,7 +1538,11 @@ async function executeConfirmedProductionAction(args: {
   } else if (args.requestedIntent === "interactive_film_create") {
     const payload = actionPayload?.interactiveFilmCreate;
     const title = requirePayloadText(payload?.title, pick(lang, "确认创建互动影游缺少标题，请重新生成确认卡。", "The interactive film confirmation is missing a title. Regenerate the confirmation card."));
-    tool = createInteractiveFilmCreationTool(args.pipeline, args.root, { actionPayload, language: lang });
+    tool = createInteractiveFilmCreationTool(args.pipeline, args.root, {
+      actionPayload,
+      language: lang,
+      defaultSkills: productionSkills("interactiveFilm"),
+    });
     params = {
       title,
       instruction: args.instruction,
@@ -1538,7 +1586,10 @@ async function executeConfirmedProductionAction(args: {
         },
       }
       : undefined;
-    tool = createPlayStartTool(args.pipeline, args.root, args.sessionId, args.playMode, { actionPayload: confirmedActionPayload });
+    tool = createPlayStartTool(args.pipeline, args.root, args.sessionId, args.playMode, {
+      actionPayload: confirmedActionPayload,
+      defaultSkills: productionSkills("play"),
+    });
     params = {
       title,
       ...(payload?.premise ? { premise: payload.premise } : {}),
@@ -1553,7 +1604,9 @@ async function executeConfirmedProductionAction(args: {
     const projectId = payload?.projectId ?? args.bookId;
     if (!projectId) throw new ApiError(400, "INVALID_ID", "interactive-film action requires a project id (bookId)");
     const agentCtx = args.pipeline.createAgentContext("film-authoring", projectId);
-    const deps = filmLLMDepsFromClient(agentCtx.client, agentCtx.model);
+    const deps = filmLLMDepsFromClient(agentCtx.client, agentCtx.model, {
+      activatedSkills: () => productionSkills("interactiveFilm"),
+    });
     tool = createDraftStructureTool(args.root, projectId, deps, lang);
     params = {
       instruction: payload?.instruction?.trim() || args.instruction,
@@ -4966,6 +5019,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             instruction,
             requestedIntent: confirmedIntent,
             actionPayload,
+            requestedSkills,
+            disabledSkills,
             language: surfaceLanguage,
             taskId,
             sourceRequestId,
@@ -6469,16 +6524,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const body: { batchSize?: number; maxTokens?: number } = await c.req.json().catch(() => ({}));
     try {
       const currentConfig = await loadCurrentProjectConfig();
+      const configuredSkills = await loadAvailableAgentSkills({ projectRoot: root });
+      const activatedSkills = resolveProductionSkillActivations(configuredSkills.skills, "translation");
       const model = createLLMTranslationModel({
         client: createLLMClient(currentConfig.llm),
         model: currentConfig.llm.model,
         maxTokens: body.maxTokens,
+        activatedSkills,
       });
       const result = await runTranslationProject(root, id, {
         model,
         batchSize: body.batchSize,
       });
-      return c.json(result);
+      return c.json({ ...result, skillIds: activatedSkillIds(activatedSkills) });
     } catch (error) {
       if (error instanceof ApiError) throw error;
       const message = error instanceof Error ? error.message : String(error);

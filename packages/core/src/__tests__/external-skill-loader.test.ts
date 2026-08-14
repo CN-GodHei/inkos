@@ -12,9 +12,12 @@ import {
 } from "../skills/index.js";
 
 const BUILTIN_SKILL_IDS = [
+  "inkos-interactive-film",
   "inkos-long-market-research",
   "inkos-long-story-analysis",
   "inkos-long-writing",
+  "inkos-play-world",
+  "inkos-script-writing",
   "inkos-short-market-research",
   "inkos-short-story-analysis",
   "inkos-short-writing",
@@ -22,6 +25,8 @@ const BUILTIN_SKILL_IDS = [
   "inkos-story-deslop",
   "inkos-story-import",
   "inkos-story-review",
+  "inkos-storyboard",
+  "inkos-translation",
 ] as const;
 
 describe("external skill loader", () => {
@@ -51,6 +56,16 @@ describe("external skill loader", () => {
         id: "inkos-story-review",
         source: "builtin",
         body: expect.stringContaining("parser or model-format failure"),
+      }),
+      expect.objectContaining({
+        id: "inkos-play-world",
+        source: "builtin",
+        body: expect.stringContaining("world contract as authority"),
+      }),
+      expect.objectContaining({
+        id: "inkos-interactive-film",
+        source: "builtin",
+        body: expect.stringContaining("Variables and flags serve story causality"),
       }),
     ]));
   });

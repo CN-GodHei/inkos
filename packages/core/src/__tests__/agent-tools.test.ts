@@ -27,6 +27,21 @@ import { ingestMaterial } from "../materials/ingest.js";
 import { createPlayDB } from "../play/play-db-factory.js";
 import { PlayStore } from "../play/play-store.js";
 
+function contextPipeline<T extends object>(pipeline: T): T & {
+  readonly runWithAgentContext: ReturnType<typeof vi.fn>;
+} {
+  return {
+    runWithAgentContext: vi.fn(async (
+      context: { readonly signal?: AbortSignal },
+      task: () => Promise<unknown>,
+    ) => {
+      context.signal?.throwIfAborted();
+      return task();
+    }),
+    ...pipeline,
+  };
+}
+
 describe("agent deterministic writing tools", () => {
   let root: string;
   let state: StateManager;
@@ -523,9 +538,9 @@ describe("agent deterministic writing tools", () => {
 
   it("uses the confirmed Play scene as the execution source of truth", async () => {
     let seededScene = "";
-    const pipeline = {
+    const pipeline = contextPipeline({
       createAgentContext: vi.fn(() => ({})),
-    };
+    });
     const tool = createPlayStartTool(pipeline as never, root, "play-session-truncated", "open", {
       actionPayload: {
         playStart: {
@@ -612,9 +627,9 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("passes the explicit architect title straight into initBook", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       initBook: vi.fn(async () => undefined),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, null);
 
     await tool.execute("tool-6", {
@@ -634,9 +649,9 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("uses confirmed create-book payload when architect tool args drift or omit defaults", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       initBook: vi.fn(async () => undefined),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, null, undefined, {
       actionPayload: {
         createBook: {
@@ -673,9 +688,9 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("derives the confirmed book id from the confirmed title instead of model-supplied bookId", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       initBook: vi.fn(async () => undefined),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, null, undefined, {
       actionPayload: {
         createBook: {
@@ -709,7 +724,7 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("returns an architect incomplete result instead of throwing when foundation repair fails", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       initBook: vi.fn(async () => {
         throw new ArchitectIncompleteFoundationError(
           ["roles", "pending_hooks"],
@@ -717,7 +732,7 @@ describe("agent deterministic writing tools", () => {
           "基础设定没有生成完整。",
         );
       }),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, null);
 
     const result = await tool.execute("tool-architect-incomplete", {
@@ -741,12 +756,12 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("passes chapterWordCount through the writer sub-agent", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       writeNextChapter: vi.fn(async () => ({
         chapterNumber: 4,
         wordCount: 2600,
       })),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     await tool.execute("tool-7", {
@@ -765,14 +780,14 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("runs a requested chapter batch through one writer operation", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       writeNextChapter: vi.fn(),
       writeChapters: vi.fn(async () => [
         { chapterNumber: 4, title: "第四章", wordCount: 2600, status: "ready-for-review" },
         { chapterNumber: 5, title: "第五章", wordCount: 2550, status: "ready-for-review" },
         { chapterNumber: 6, title: "第六章", wordCount: 2490, status: "audit-failed" },
       ]),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     const result = await tool.execute("tool-writer-batch", {
@@ -797,12 +812,11 @@ describe("agent deterministic writing tools", () => {
     });
   });
 
-  it("runs the writer pipeline inside the tool AbortSignal scope", async () => {
+  it("runs the writer pipeline inside the shared AgentContext scope", async () => {
     const controller = new AbortController();
-    const pipeline = {
-      runWithAbortSignal: vi.fn(async (_signal: AbortSignal, task: () => Promise<unknown>) => task()),
+    const pipeline = contextPipeline({
       writeNextChapter: vi.fn(async () => ({ chapterNumber: 4, wordCount: 2600 })),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     await tool.execute("tool-writer-abort", {
@@ -811,7 +825,10 @@ describe("agent deterministic writing tools", () => {
       instruction: "继续写下一章",
     } as any, controller.signal);
 
-    expect(pipeline.runWithAbortSignal).toHaveBeenCalledWith(controller.signal, expect.any(Function));
+    expect(pipeline.runWithAgentContext).toHaveBeenCalledWith(
+      { signal: controller.signal, activatedSkills: [] },
+      expect.any(Function),
+    );
     expect(pipeline.writeNextChapter).toHaveBeenCalledOnce();
   });
 
@@ -892,14 +909,14 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("does not claim writer success when the chapter audit failed", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       writeNextChapter: vi.fn(async () => ({
         chapterNumber: 1,
         title: "雨棚账单",
         wordCount: 971,
         status: "audit-failed",
       })),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     const result = await tool.execute("tool-writer-audit-failed", {
@@ -923,11 +940,11 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("surfaces writer sub-agent pipeline failures as tool errors", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       writeNextChapter: vi.fn(async () => {
         throw new Error("disk write failed");
       }),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     await expect(tool.execute("tool-writer-fails", {
@@ -938,7 +955,7 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("surfaces unchanged reviser results instead of claiming completion", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       reviseDraft: vi.fn(async () => ({
         chapterNumber: 1,
         wordCount: 11132,
@@ -955,7 +972,7 @@ describe("agent deterministic writing tools", () => {
           ],
         },
       })),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     const result = await tool.execute("tool-reviser-unchanged", {
@@ -990,12 +1007,12 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("uses the active book for writer when bookId is omitted", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       writeNextChapter: vi.fn(async () => ({
         chapterNumber: 4,
         wordCount: 2600,
       })),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     await tool.execute("tool-writer-active", {
@@ -1115,9 +1132,9 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("allows architect revise mode to use the active book", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       reviseFoundation: vi.fn(async () => undefined),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     const result = await tool.execute("tool-architect-revise-active", {
@@ -1156,7 +1173,7 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("prefers explicit reviser mode over instruction guessing", async () => {
-    const pipeline = {
+    const pipeline = contextPipeline({
       reviseDraft: vi.fn(async () => ({
         chapterNumber: 3,
         wordCount: 120,
@@ -1164,7 +1181,7 @@ describe("agent deterministic writing tools", () => {
         applied: true,
         status: "ready-for-review" as const,
       })),
-    };
+    });
     const tool = createSubAgentTool(pipeline as never, "harbor");
 
     await tool.execute("tool-8", {

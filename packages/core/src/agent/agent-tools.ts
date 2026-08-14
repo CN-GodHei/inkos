@@ -44,6 +44,10 @@ import {
   runWithAgentTrajectoryRole,
 } from "../llm/agent-trajectory.js";
 import type { ActivatedSkillGuidance } from "./skill-tool.js";
+import {
+  activatedSkillIds,
+  mergeActivatedSkillGuidance,
+} from "../skills/production-bindings.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,7 +94,7 @@ function closePlayDB(db: PlayGraphDB): void {
 
 // runnerFactory 注入的测试替身没有 close 方法，可选调用兜底。
 function closePlayRunner(runner: unknown): void {
-  (runner as { close?: () => void }).close?.();
+  (runner as { close?: () => void } | null | undefined)?.close?.();
 }
 
 function safePlayId(value: string | undefined, fallback: string): string {
@@ -666,24 +670,8 @@ function runPipelineWithAgentContext<T>(
   activatedSkills: ReadonlyArray<ActivatedSkillGuidance>,
   task: () => Promise<T>,
 ): Promise<T> {
-  // PipelineRunner owns cancellation and professional-guidance scope. The
-  // fallback keeps lightweight embedders/test doubles source-compatible.
-  const runner = pipeline as PipelineRunner & {
-    runWithAgentContext?: <R>(
-      context: {
-        readonly signal?: AbortSignal;
-        readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
-      },
-      activeTask: () => Promise<R>,
-    ) => Promise<R>;
-    runWithAbortSignal?: <R>(activeSignal: AbortSignal | undefined, activeTask: () => Promise<R>) => Promise<R>;
-  };
   return runAsWorkflowTrajectory(() => (
-    runner.runWithAgentContext
-      ? runner.runWithAgentContext({ signal, activatedSkills }, task)
-      : runner.runWithAbortSignal
-      ? runner.runWithAbortSignal(signal, task)
-      : task()
+    pipeline.runWithAgentContext({ signal, activatedSkills }, task)
   ));
 }
 
@@ -693,6 +681,18 @@ function runPipelineWithAbortSignal<T>(
   task: () => Promise<T>,
 ): Promise<T> {
   return runPipelineWithAgentContext(pipeline, signal, [], task);
+}
+
+interface SkillAwareProductionOptions {
+  readonly defaultSkills?: ReadonlyArray<ActivatedSkillGuidance>;
+  readonly activeSkills?: () => ReadonlyArray<ActivatedSkillGuidance>;
+}
+
+function resolveProductionToolSkills(options: SkillAwareProductionOptions): ActivatedSkillGuidance[] {
+  return mergeActivatedSkillGuidance(
+    options.defaultSkills ?? [],
+    options.activeSkills?.() ?? [],
+  );
 }
 
 export function createSubAgentTool(
@@ -726,7 +726,7 @@ export function createSubAgentTool(
     ): Promise<AgentToolResult<unknown>> {
       return runWithAgentTrajectoryRole("subagent", async () => {
         const { agent, instruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, revise, feedback, mode, format, approvedOnly } = params;
-        const activatedSkills = mergeActivatedSkills(
+        const activatedSkills = mergeActivatedSkillGuidance(
           options.workerSkills?.(agent) ?? [],
           options.activeSkills?.() ?? [],
         );
@@ -1005,16 +1005,6 @@ export function createSubAgentTool(
       }, toolCallId);
     },
   };
-}
-
-function mergeActivatedSkills(
-  ...groups: ReadonlyArray<ReadonlyArray<ActivatedSkillGuidance>>
-): ActivatedSkillGuidance[] {
-  const merged = new Map<string, ActivatedSkillGuidance>();
-  for (const group of groups) {
-    for (const activation of group) merged.set(activation.skill.id, activation);
-  }
-  return [...merged.values()];
 }
 
 // ---------------------------------------------------------------------------
@@ -1557,7 +1547,10 @@ function assertShortRunCharsPerChapter(
 export function createShortFictionRunTool(
   pipeline: PipelineRunner,
   projectRoot: string,
-  options: { readonly actionPayload?: ActionPayload; readonly language?: "zh" | "en" } = {},
+  options: {
+    readonly actionPayload?: ActionPayload;
+    readonly language?: "zh" | "en";
+  } & SkillAwareProductionOptions = {},
 ): AgentTool<typeof ShortFictionRunParams> {
   return {
     name: "short_fiction_run",
@@ -1577,10 +1570,12 @@ export function createShortFictionRunTool(
       const shortPayload = options.actionPayload?.shortRun;
       const language = shortPayload?.language ?? options.language;
       const charsPerChapter = shortPayload?.charsPerChapter ?? params.charsPerChapter;
+      const activatedSkills = resolveProductionToolSkills(options);
       assertShortRunCharsPerChapter(charsPerChapter, language ?? "zh");
-      const result = await runPipelineWithAbortSignal(
+      const result = await runPipelineWithAgentContext(
         pipeline,
         _signal,
+        activatedSkills,
         () => runShortFictionProduction({
           projectRoot,
           direction: shortPayload?.direction ?? params.direction,
@@ -1622,7 +1617,7 @@ export function createShortFictionRunTool(
                 "The short fiction draft, synopsis, selling points, and cover prompt were still written successfully.",
               ].join("\n"),
         ].join("\n"),
-        { kind: "short_fiction_created", ...result },
+        { kind: "short_fiction_created", ...result, skillIds: activatedSkillIds(activatedSkills) },
       );
     },
   };
@@ -1749,7 +1744,10 @@ type ScriptCreateParamsType = Static<typeof ScriptCreateParams>;
 export function createScriptCreationTool(
   pipeline: PipelineRunner,
   projectRoot: string,
-  options: { readonly actionPayload?: ActionPayload; readonly language?: "zh" | "en" } = {},
+  options: {
+    readonly actionPayload?: ActionPayload;
+    readonly language?: "zh" | "en";
+  } & SkillAwareProductionOptions = {},
 ): AgentTool<typeof ScriptCreateParams> {
   return {
     name: "script_create",
@@ -1766,7 +1764,8 @@ export function createScriptCreationTool(
     ): Promise<AgentToolResult<unknown>> {
       const progress = (message: string) => onUpdate?.(textResult(message));
       const payload = options.actionPayload?.scriptCreate;
-      const result = await runPipelineWithAbortSignal(pipeline, _signal, () => runScriptCreation({
+      const activatedSkills = resolveProductionToolSkills(options);
+      const result = await runPipelineWithAgentContext(pipeline, _signal, activatedSkills, () => runScriptCreation({
         projectRoot,
         runtime: pipeline.createAgentContext("script-creation"),
         title: payload?.title ?? params.title,
@@ -1790,7 +1789,7 @@ export function createScriptCreationTool(
           `Spec: ${result.specPath}`,
           `Script: ${result.scriptPath}`,
         ].join("\n"),
-        { kind: "script_created", ...result },
+        { kind: "script_created", ...result, skillIds: activatedSkillIds(activatedSkills) },
       );
     },
   };
@@ -1840,7 +1839,10 @@ type StoryboardCreateParamsType = Static<typeof StoryboardCreateParams>;
 export function createStoryboardCreationTool(
   pipeline: PipelineRunner,
   projectRoot: string,
-  options: { readonly actionPayload?: ActionPayload; readonly language?: "zh" | "en" } = {},
+  options: {
+    readonly actionPayload?: ActionPayload;
+    readonly language?: "zh" | "en";
+  } & SkillAwareProductionOptions = {},
 ): AgentTool<typeof StoryboardCreateParams> {
   return {
     name: "storyboard_create",
@@ -1857,7 +1859,8 @@ export function createStoryboardCreationTool(
     ): Promise<AgentToolResult<unknown>> {
       const progress = (message: string) => onUpdate?.(textResult(message));
       const payload = options.actionPayload?.storyboardCreate;
-      const result = await runPipelineWithAbortSignal(pipeline, _signal, () => runStoryboardCreation({
+      const activatedSkills = resolveProductionToolSkills(options);
+      const result = await runPipelineWithAgentContext(pipeline, _signal, activatedSkills, () => runStoryboardCreation({
         projectRoot,
         runtime: pipeline.createAgentContext("storyboard-creation"),
         title: payload?.title ?? params.title,
@@ -1884,7 +1887,7 @@ export function createStoryboardCreationTool(
           `Image prompts: ${result.imagePromptsPath}`,
           `Image assets: ${result.assetsManifestPath}`,
         ].join("\n"),
-        { kind: "storyboard_created", ...result },
+        { kind: "storyboard_created", ...result, skillIds: activatedSkillIds(activatedSkills) },
       );
     },
   };
@@ -1937,7 +1940,10 @@ type InteractiveFilmCreateParamsType = Static<typeof InteractiveFilmCreateParams
 export function createInteractiveFilmCreationTool(
   pipeline: PipelineRunner,
   projectRoot: string,
-  options: { readonly actionPayload?: ActionPayload; readonly language?: "zh" | "en" } = {},
+  options: {
+    readonly actionPayload?: ActionPayload;
+    readonly language?: "zh" | "en";
+  } & SkillAwareProductionOptions = {},
 ): AgentTool<typeof InteractiveFilmCreateParams> {
   return {
     name: "interactive_film_create",
@@ -1954,7 +1960,8 @@ export function createInteractiveFilmCreationTool(
     ): Promise<AgentToolResult<unknown>> {
       const progress = (message: string) => onUpdate?.(textResult(message));
       const payload = options.actionPayload?.interactiveFilmCreate;
-      const result = await runPipelineWithAbortSignal(pipeline, _signal, () => runInteractiveFilmCreation({
+      const activatedSkills = resolveProductionToolSkills(options);
+      const result = await runPipelineWithAgentContext(pipeline, _signal, activatedSkills, () => runInteractiveFilmCreation({
         projectRoot,
         runtime: pipeline.createAgentContext("interactive-film-creation"),
         title: payload?.title ?? params.title,
@@ -1986,7 +1993,7 @@ export function createInteractiveFilmCreationTool(
           `Image prompts: ${result.imagePromptsPath}`,
           `Image assets: ${result.assetsManifestPath}`,
         ].join("\n"),
-        { kind: "interactive_film_created", ...result },
+        { kind: "interactive_film_created", ...result, skillIds: activatedSkillIds(activatedSkills) },
       );
     },
   };
@@ -2105,7 +2112,7 @@ const PlayStartParams = Type.Object({
 
 type PlayStartParamsType = Static<typeof PlayStartParams>;
 
-export interface PlayStartToolOptions {
+export interface PlayStartToolOptions extends SkillAwareProductionOptions {
   readonly actionPayload?: ActionPayload;
   readonly runnerFactory?: (input: {
     readonly projectRoot: string;
@@ -2138,6 +2145,7 @@ export function createPlayStartTool(
       _signal?.throwIfAborted();
       onUpdate?.(textResult("Starting interactive world..."));
       const playPayload = options.actionPayload?.playStart;
+      const activatedSkills = resolveProductionToolSkills(options);
       const store = new PlayStore(projectRoot);
       // The play world is bound 1:1 to the chat session: worldId IS the
       // sessionId. This removes any "which world?" ambiguity, so two play
@@ -2189,23 +2197,26 @@ export function createPlayStartTool(
       if (existingTranscript.length === 0 && pipeline) {
         const db = createPlayDB(store.runDir(world.id, runId));
         try {
-          const ctx = pipeline.createAgentContext("play");
-          const runner = options.runnerFactory?.({
-            projectRoot,
-            worldId: world.id,
-            runId,
-            ctx,
-          }) ?? new PlayRunner({
-            projectRoot,
-            worldId: world.id,
-            runId,
-            ctx,
-            db,
-          });
-          seed = await runPipelineWithAbortSignal(
+          seed = await runPipelineWithAgentContext(
             pipeline,
             _signal,
-            () => runner.seedOpening({ sceneText, suggestedActions }),
+            activatedSkills,
+            () => {
+              const ctx = pipeline.createAgentContext("play");
+              const runner = options.runnerFactory?.({
+                projectRoot,
+                worldId: world.id,
+                runId,
+                ctx,
+              }) ?? new PlayRunner({
+                projectRoot,
+                worldId: world.id,
+                runId,
+                ctx,
+                db,
+              });
+              return runner.seedOpening({ sceneText, suggestedActions });
+            },
           );
           _signal?.throwIfAborted();
           graph = db.snapshot();
@@ -2231,6 +2242,7 @@ export function createPlayStartTool(
           visualContract: world.visualContract,
           sceneText,
           suggestedActions,
+          skillIds: activatedSkillIds(activatedSkills),
           ...(seed ? { seedMutation: seed.mutation } : {}),
           ...(graph ? { graph } : {}),
         },
@@ -2247,7 +2259,7 @@ const PlayStepParams = Type.Object({
 
 type PlayStepParamsType = Static<typeof PlayStepParams>;
 
-export interface PlayStepToolOptions {
+export interface PlayStepToolOptions extends SkillAwareProductionOptions {
   readonly language?: "zh" | "en";
   readonly runnerFactory?: (input: {
     readonly projectRoot: string;
@@ -2278,7 +2290,7 @@ const PlayReviseParams = Type.Object({
 
 type PlayReviseParamsType = Static<typeof PlayReviseParams>;
 
-export interface PlayReviseToolOptions {
+export interface PlayReviseToolOptions extends SkillAwareProductionOptions {
   readonly language?: "zh" | "en";
   readonly runnerFactory?: (input: {
     readonly projectRoot: string;
@@ -2500,22 +2512,27 @@ export function createPlayStepTool(
         );
       }
       const target = { worldId, runId, world };
+      const activatedSkills = resolveProductionToolSkills(options);
       onUpdate?.(textResult(`Advancing "${target.worldId}" / "${target.runId}"...`));
-      const ctx = pipeline.createAgentContext("play");
-      const runner = options.runnerFactory?.({
-        projectRoot,
-        worldId: target.worldId,
-        runId: target.runId,
-        ctx,
-      }) ?? new PlayRunner({
-        projectRoot,
-        worldId: target.worldId,
-        runId: target.runId,
-        ctx,
-      });
-      let step: Awaited<ReturnType<typeof runner.step>>;
+      let runner: ({ step(input: string): Promise<PlayStepResult> } & { close?: () => void }) | undefined;
+      let step: PlayStepResult;
       try {
-        step = await runner.step(input);
+        step = await runPipelineWithAgentContext(pipeline, _signal, activatedSkills, () => {
+          const ctx = pipeline.createAgentContext("play");
+          const activeRunner = options.runnerFactory?.({
+            projectRoot,
+            worldId: target.worldId,
+            runId: target.runId,
+            ctx,
+          }) ?? new PlayRunner({
+            projectRoot,
+            worldId: target.worldId,
+            runId: target.runId,
+            ctx,
+          });
+          runner = activeRunner;
+          return activeRunner.step(input);
+        });
       } catch (err) {
         // Never hand a raw tool error to the outer agent — it improvises a fake
         // "service unavailable / reload your save" message. Return a fixed, graceful
@@ -2530,6 +2547,7 @@ export function createPlayStepTool(
             worldId: target.worldId,
             runId: target.runId,
             error: err instanceof Error ? err.message : String(err),
+            skillIds: activatedSkillIds(activatedSkills),
           },
         );
       } finally {
@@ -2558,6 +2576,7 @@ export function createPlayStepTool(
           mutation: step.mutation,
           currentState,
           graph,
+          skillIds: activatedSkillIds(activatedSkills),
         },
       );
     },
@@ -2595,12 +2614,23 @@ export function createPlayReviseTool(
         );
       }
       const isZh = (world.language ?? "zh") !== "en";
-      const ctx = pipeline.createAgentContext("play");
-      const runner = options.runnerFactory?.({ projectRoot, worldId, runId, ctx }) ?? new PlayRunner({
-        projectRoot,
-        worldId,
-        runId,
-        ctx,
+      const activatedSkills = resolveProductionToolSkills(options);
+      let runner: ({
+        regenerateLastTurn(input?: string): Promise<PlayReplayResult>;
+        restoreVariant(input: { readonly turn: number; readonly variantId: string }): Promise<PlayVariantRestoreResult>;
+      } & { close?: () => void }) | undefined;
+      const runWithPlayRunner = <T>(
+        task: (activeRunner: NonNullable<typeof runner>) => Promise<T>,
+      ): Promise<T> => runPipelineWithAgentContext(pipeline, _signal, activatedSkills, () => {
+        const ctx = pipeline.createAgentContext("play");
+        const activeRunner = options.runnerFactory?.({ projectRoot, worldId, runId, ctx }) ?? new PlayRunner({
+          projectRoot,
+          worldId,
+          runId,
+          ctx,
+        });
+        runner = activeRunner;
+        return task(activeRunner);
       });
 
       let replay: PlayReplayResult;
@@ -2617,10 +2647,10 @@ export function createPlayReviseTool(
             );
           }
           onUpdate?.(textResult(`Restoring play variant "${variantId}"...`));
-          const restored = await runner.restoreVariant({
+          const restored = await runWithPlayRunner((activeRunner) => activeRunner.restoreVariant({
             turn: Math.trunc(turn),
             variantId,
-          });
+          }));
           return textResult(
             restored.sceneText || (isZh ? "已切换到指定互动回合版本。" : "Switched to the requested play turn variant."),
             {
@@ -2631,6 +2661,7 @@ export function createPlayReviseTool(
               turn: restored.turn,
               variantId: restored.variantId,
               sceneText: restored.sceneText,
+              skillIds: activatedSkillIds(activatedSkills),
             },
           );
         }
@@ -2645,7 +2676,7 @@ export function createPlayReviseTool(
         }
         onUpdate?.(textResult(params.action === "edit_last_input" ? "Replaying edited play turn..." : "Regenerating last play turn..."));
         try {
-          replay = await runner.regenerateLastTurn(replacement);
+          replay = await runWithPlayRunner((activeRunner) => activeRunner.regenerateLastTurn(replacement));
         } catch (err) {
           return textResult(
             isZh
@@ -2656,6 +2687,7 @@ export function createPlayReviseTool(
               worldId,
               runId,
               error: err instanceof Error ? err.message : String(err),
+              skillIds: activatedSkillIds(activatedSkills),
             },
           );
         }
@@ -2688,6 +2720,7 @@ export function createPlayReviseTool(
           variantId: replay.variantId,
           currentState,
           graph,
+          skillIds: activatedSkillIds(activatedSkills),
         },
       );
     },

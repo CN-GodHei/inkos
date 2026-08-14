@@ -2,6 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { validateToolArguments } from "@mariozechner/pi-ai";
 import { createSubAgentTool } from "../agent/agent-tools.js";
 
+function withAgentContext<T extends Record<string, unknown>>(pipeline: T): T & {
+  runWithAgentContext: (_context: unknown, task: () => Promise<unknown>) => Promise<unknown>;
+} {
+  return {
+    ...pipeline,
+    runWithAgentContext: async (_context, task) => task(),
+  };
+}
+
 describe("SubAgentParams schema", () => {
   const mockPipeline = {} as any;
   const tool = createSubAgentTool(mockPipeline, null);
@@ -82,7 +91,7 @@ describe("architect agent — BookConfig construction", () => {
 
   beforeEach(() => {
     initBookMock = vi.fn(async () => {});
-    const mockPipeline = { initBook: initBookMock } as any;
+    const mockPipeline = withAgentContext({ initBook: initBookMock }) as any;
     tool = createSubAgentTool(mockPipeline, null);
   });
 
@@ -148,7 +157,7 @@ describe("writer agent — wordCount passthrough", () => {
 
   beforeEach(() => {
     writeNextChapterMock = vi.fn(async () => ({ wordCount: 3000 }));
-    const mockPipeline = { writeNextChapter: writeNextChapterMock } as any;
+    const mockPipeline = withAgentContext({ writeNextChapter: writeNextChapterMock }) as any;
     tool = createSubAgentTool(mockPipeline, "my-book");
   });
 
@@ -172,7 +181,7 @@ describe("auditor agent — rich return value", () => {
         { severity: "critical", description: "Name inconsistency" },
       ],
     }));
-    const tool = createSubAgentTool({ auditDraft: auditDraftMock } as any, "my-book");
+    const tool = createSubAgentTool(withAgentContext({ auditDraft: auditDraftMock }) as any, "my-book");
     const result = await tool.execute("tc1", { agent: "auditor", instruction: "Audit", bookId: "my-book", chapterNumber: 3 });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("FAILED");
@@ -189,7 +198,7 @@ describe("reviser agent — mode field", () => {
 
   beforeEach(() => {
     reviseDraftMock = vi.fn(async () => ({}));
-    tool = createSubAgentTool({ reviseDraft: reviseDraftMock } as any, "my-book");
+    tool = createSubAgentTool(withAgentContext({ reviseDraft: reviseDraftMock }) as any, "my-book");
   });
 
   it("uses mode param directly", async () => {
