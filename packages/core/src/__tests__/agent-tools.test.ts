@@ -353,10 +353,10 @@ describe("agent deterministic writing tools", () => {
     });
   });
 
-  it("rejects truncated play initial scenes in confirmation payloads", async () => {
+  it("preserves the model-proposed Play scene without semantic template filtering", async () => {
     const tool = createProposeActionTool("zh");
 
-    await expect(tool.execute("proposal-play", {
+    const result = await tool.execute("proposal-play", {
       action: "play_start",
       instruction: "开一个旧戏院检修互动世界，从配电室和后台开始。",
       playStart: {
@@ -366,7 +366,15 @@ describe("agent deterministic writing tools", () => {
         initialScene: "剧目是《挑滑车》，主演栏里有个名字叫",
         suggestedActions: ["检查演出表", "走向配电室"],
       },
-    })).rejects.toThrow("playStart.initialScene");
+    });
+
+    expect(result.details).toMatchObject({
+      actionPayload: {
+        playStart: {
+          initialScene: "剧目是《挑滑车》，主演栏里有个名字叫",
+        },
+      },
+    });
   });
 
   it("keeps play world and visual contracts in the structured confirmation payload", async () => {
@@ -513,7 +521,7 @@ describe("agent deterministic writing tools", () => {
     expect(JSON.stringify(result.details)).not.toContain("episodeCount");
   });
 
-  it("falls back to the tool argument when confirmed play payload contains a truncated initial scene", async () => {
+  it("uses the confirmed Play scene as the execution source of truth", async () => {
     let seededScene = "";
     const pipeline = {
       createAgentContext: vi.fn(() => ({})),
@@ -544,10 +552,9 @@ describe("agent deterministic writing tools", () => {
       suggestedActions: ["检查演出表"],
     });
 
-    expect(seededScene).toContain("主演栏写着赵铁生");
-    expect(seededScene).not.toContain("名字叫");
+    expect(seededScene).toContain("主演栏里有个名字叫");
     await expect(readFile(join(root, "worlds", "play-session-truncated", "runs", "main", "projections", "scene.md"), "utf-8"))
-      .resolves.toContain("主演栏写着赵铁生");
+      .resolves.toContain("主演栏里有个名字叫");
   });
 
   it("does not emit a confirmation card when the proposed action payload is invalid", async () => {
@@ -749,7 +756,12 @@ describe("agent deterministic writing tools", () => {
       instruction: "继续写，控制在 2600 字",
     } as any);
 
-    expect(pipeline.writeNextChapter).toHaveBeenCalledWith("harbor", 2600);
+    expect(pipeline.writeNextChapter).toHaveBeenCalledWith(
+      "harbor",
+      2600,
+      undefined,
+      "继续写，控制在 2600 字",
+    );
   });
 
   it("runs a requested chapter batch through one writer operation", async () => {
@@ -801,6 +813,82 @@ describe("agent deterministic writing tools", () => {
 
     expect(pipeline.runWithAbortSignal).toHaveBeenCalledWith(controller.signal, expect.any(Function));
     expect(pipeline.writeNextChapter).toHaveBeenCalledOnce();
+  });
+
+  it("passes activated Skill guidance and the exact user instruction into the writer", async () => {
+    const activatedSkills = [{
+      skill: {
+        id: "longform-pacing",
+        name: "Long-form pacing",
+        description: "Keep scene-level cause and effect visible.",
+        body: "Every turn must alter pressure, evidence, or relationship state.",
+        source: "external" as const,
+      },
+      resources: [{
+        path: "references/pacing.md",
+        heading: "Pressure chain",
+        body: "Escalate through consequences rather than arbitrary surprises.",
+        charStart: 12,
+        charEnd: 88,
+      }],
+    }];
+    const pipeline = {
+      runWithAgentContext: vi.fn(async (_context: unknown, task: () => Promise<unknown>) => task()),
+      writeNextChapter: vi.fn(async () => ({ chapterNumber: 4, wordCount: 2600 })),
+    };
+    const instruction = "重写节奏方向：这一章先让证据链反噬主角，不要直接揭晓凶手。";
+    const tool = createSubAgentTool(pipeline as never, "harbor", undefined, {
+      activeSkills: () => activatedSkills,
+    });
+
+    const result = await tool.execute("tool-writer-skill", {
+      agent: "writer",
+      instruction,
+    } as any);
+
+    expect(pipeline.runWithAgentContext).toHaveBeenCalledWith(
+      { signal: undefined, activatedSkills },
+      expect.any(Function),
+    );
+    expect(pipeline.writeNextChapter).toHaveBeenCalledWith("harbor", undefined, undefined, instruction);
+    expect(result.details).toMatchObject({
+      kind: "chapter_written",
+      skillIds: ["longform-pacing"],
+    });
+  });
+
+  it("injects the host-selected long-writing Skill into the worker without relying on agent intent", async () => {
+    const longWritingSkill = {
+      skill: {
+        id: "inkos-long-writing",
+        name: "Long-form narrative craft",
+        description: "Shared long-form worker method.",
+        body: "Build scenes through objective, resistance, turn, and consequence.",
+        source: "builtin" as const,
+      },
+      resources: [],
+    };
+    const pipeline = {
+      runWithAgentContext: vi.fn(async (_context: unknown, task: () => Promise<unknown>) => task()),
+      writeNextChapter: vi.fn(async () => ({ chapterNumber: 2, wordCount: 2400 })),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor", undefined, {
+      workerSkills: (agent) => agent === "writer" ? [longWritingSkill] : [],
+    });
+
+    const result = await tool.execute("tool-writer-default-skill", {
+      agent: "writer",
+      instruction: "让这一章用一场谈判改变两人的关系。",
+    } as any);
+
+    expect(pipeline.runWithAgentContext).toHaveBeenCalledWith(
+      { signal: undefined, activatedSkills: [longWritingSkill] },
+      expect.any(Function),
+    );
+    expect(result.details).toMatchObject({
+      kind: "chapter_written",
+      skillIds: ["inkos-long-writing"],
+    });
   });
 
   it("does not claim writer success when the chapter audit failed", async () => {
@@ -916,7 +1004,27 @@ describe("agent deterministic writing tools", () => {
       instruction: "继续写下一章",
     } as any);
 
-    expect(pipeline.writeNextChapter).toHaveBeenCalledWith("harbor", 2600);
+    expect(pipeline.writeNextChapter).toHaveBeenCalledWith(
+      "harbor",
+      2600,
+      undefined,
+      "继续写下一章",
+    );
+  });
+
+  it("uses structured exporter arguments instead of parsing natural-language instruction", async () => {
+    const tool = createSubAgentTool({} as never, "harbor", root);
+
+    const result = await tool.execute("tool-export-defaults", {
+      agent: "exporter",
+      instruction: "请导出 EPUB，并且只要已通过章节",
+    } as any);
+
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type === "text") {
+      expect(result.content[0].text).toContain(".txt");
+      expect(result.content[0].text).not.toContain(".epub");
+    }
   });
 
   it("documents sub_agent bookId as an optional active-book override", () => {

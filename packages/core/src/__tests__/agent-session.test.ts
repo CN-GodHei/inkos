@@ -990,7 +990,7 @@ describe("runAgentSession cache — bookId switch", () => {
     );
   });
 
-  it("blocks raw chapter prose in book chat when no production tool ran", async () => {
+  it("does not rewrite assistant prose by guessing whether it looks like a chapter", async () => {
     const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
     const pipeline = {} as any;
 
@@ -999,9 +999,8 @@ describe("runAgentSession cache — bookId switch", () => {
       "raw chapter",
     );
 
-    expect(result.responseText).toContain("没有调用落盘工具");
-    expect(result.responseText).toContain("修改旧章");
-    expect(result.responseText).not.toContain("# 第2章");
+    expect(result.responseText).toContain("# 第2章");
+    expect(result.responseText).not.toContain("没有调用落盘工具");
   });
 
   it("does not replace chapter-scoped revision instructions as raw chapter prose", async () => {

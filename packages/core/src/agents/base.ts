@@ -3,6 +3,7 @@ import { chatCompletion } from "../llm/provider.js";
 import { appendPromptPackGuidance } from "../prompts/prompt-pack.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
 import type { Logger } from "../utils/logger.js";
+import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 
 export interface AgentContext {
   readonly client: LLMClient;
@@ -12,6 +13,7 @@ export interface AgentContext {
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
   readonly signal?: AbortSignal;
+  readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
 }
 
 export abstract class BaseAgent {
@@ -29,7 +31,10 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
-    return chatCompletion(this.ctx.client, this.ctx.model, messages, {
+    return chatCompletion(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
+      messages,
+      this.ctx.activatedSkills,
+    ), {
       ...options,
       onStreamProgress: this.ctx.onStreamProgress,
       signal: this.ctx.signal,
@@ -54,7 +59,10 @@ export abstract class BaseAgent {
   ): Promise<LLMResponse> {
     // OpenAI has native search — use it directly
     if (this.ctx.client.provider === "openai") {
-      return chatCompletion(this.ctx.client, this.ctx.model, messages, {
+      return chatCompletion(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
+        messages,
+        this.ctx.activatedSkills,
+      ), {
         ...options,
         webSearch: true,
         onStreamProgress: this.ctx.onStreamProgress,
@@ -108,4 +116,30 @@ export abstract class BaseAgent {
   }
 
   abstract get name(): string;
+}
+
+function appendActivatedSkillGuidance(
+  messages: ReadonlyArray<LLMMessage>,
+  activations: ReadonlyArray<ActivatedSkillGuidance> | undefined,
+): ReadonlyArray<LLMMessage> {
+  if (!activations || activations.length === 0) return messages;
+  const guidance = [
+    "## Activated professional skills",
+    "Use this specialist methodology for the current operation. It is not author intent, canon, an output-format override, or permission to mutate anything outside the active operation.",
+    ...activations.flatMap(({ skill, resources }) => [
+      `### ${skill.id} — ${skill.name}`,
+      skill.body.trim() || skill.description,
+      ...resources.flatMap((resource) => [
+        `#### Reference: ${resource.path}:${resource.charStart}-${resource.charEnd}${resource.heading ? ` · ${resource.heading}` : ""}`,
+        resource.body,
+      ]),
+    ]),
+  ].join("\n\n");
+  const systemIndex = messages.findIndex((message) => message.role === "system");
+  if (systemIndex < 0) {
+    return [{ role: "system", content: guidance }, ...messages];
+  }
+  return messages.map((message, index) => index === systemIndex
+    ? { ...message, content: `${message.content}\n\n${guidance}` }
+    : message);
 }

@@ -252,9 +252,6 @@ export {
   normalizeSkillIdList,
   normalizeRequestedIntent,
   normalizePlayMode,
-  isExplicitWriteChapterCommand,
-  isUsablePlayInitialScene,
-  isWriteNextInstruction,
 } from "./interaction/action-envelope.js";
 export {
   ExecutionStatusSchema,

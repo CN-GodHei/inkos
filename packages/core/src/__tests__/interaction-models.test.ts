@@ -17,9 +17,6 @@ import {
   bindActiveBook,
   clearPendingDecision,
   isTerminalExecutionStatus,
-  isExplicitWriteChapterCommand,
-  isUsablePlayInitialScene,
-  isWriteNextInstruction,
   normalizeActionSource,
   normalizePlayMode,
   normalizeRequestedIntent,
@@ -114,32 +111,6 @@ describe("interaction models", () => {
       title: "盛世账页",
       budget: "5000元",
     });
-  });
-
-  it("uses one write-next detector across Studio and TUI entrypoints", () => {
-    expect(isWriteNextInstruction("继续写")).toBe(true);
-    expect(isWriteNextInstruction("write next")).toBe(true);
-    expect(isWriteNextInstruction("/write")).toBe(false);
-    expect(isWriteNextInstruction("/write", { allowSlashWrite: true })).toBe(true);
-    expect(isWriteNextInstruction("我们讨论一下要不要继续写")).toBe(false);
-  });
-
-  it("recognizes only explicit natural-language chapter writing commands", () => {
-    expect(isExplicitWriteChapterCommand("开始写第一章。")).toBe(true);
-    expect(isExplicitWriteChapterCommand("请写下一章，写完后落盘。")).toBe(true);
-    expect(isExplicitWriteChapterCommand("write chapter 1")).toBe(true);
-    expect(isExplicitWriteChapterCommand("连续写5章")).toBe(false);
-    expect(isExplicitWriteChapterCommand("write 5 chapters")).toBe(false);
-    expect(isExplicitWriteChapterCommand("写第5章")).toBe(false);
-    expect(isExplicitWriteChapterCommand("继续")).toBe(false);
-    expect(isExplicitWriteChapterCommand("我们讨论一下要不要写下一章")).toBe(false);
-    expect(isExplicitWriteChapterCommand("我觉得第一章应该怎么写？")).toBe(false);
-  });
-
-  it("rejects obviously truncated play initial scenes before they become execution payloads", () => {
-    expect(isUsablePlayInitialScene("暴雨敲着铁皮门，封存档案箱压在门口。")).toBe(true);
-    expect(isUsablePlayInitialScene("剧目是《挑滑车》，主演栏里有个名字叫")).toBe(false);
-    expect(isUsablePlayInitialScene("主演栏：赵铁生。后台传来第二声拍板。")).toBe(true);
   });
 
   it("recognizes terminal execution statuses", () => {

@@ -1,17 +1,17 @@
 ---
 name: inkos-long-writing
-description: 长篇小说建书、续写、方向调整与章节协作。Use for long-form creation while preserving author intent, canon, and review gates.
+description: 长篇小说的场景构造、人物因果、信息释放与连载节奏。Used by InkOS long-form workers as their shared craft method.
 ---
-# Long-form writing
+# Long-form narrative craft
 
-Use this skill for creating, planning, continuing, or substantially revising a long-form book.
+Apply this method inside the active architect, writer, auditor, or reviser operation.
 
-- Conversation comes first. A discussion, question, or request for options is not permission to write or edit.
-- In general chat, propose the appropriate action and wait for confirmation. In an active book, use the existing `sub_agent` writer, auditor, or reviser rather than drafting chapter prose in chat.
-- Preserve the authority order: established facts and published chapters; durable book rules; current author direction; model defaults and genre convention.
-- When sources are bound to the book, use them only for the purposes the user stated. Never let a reference override author intent or canon, and never reproduce source wording.
-- Make each scene change conflict, evidence, emotion, relationship, knowledge, or consequence. Do not pad to satisfy length.
-- Report the real tool result and review status. Never claim a chapter was saved without a successful artifact result.
-- Respond in the user's language.
-
-Load `references/collaboration-protocol.md` when deciding between discussion, writing, revision, and canon change.
+- Turn the chapter goal into scenes with an immediate objective, resistance, a meaningful turn, and consequences that survive the scene.
+- Let character choices follow what each person wants, knows, fears, and can afford. Relationships change through events, not author explanation.
+- Reveal setting and backstory through action, evidence, dialogue, and sensory particulars. Do not replace a scene with a synopsis or analysis.
+- Every passage must alter conflict, evidence, emotion, relationship, knowledge, position, or future consequence. Remove padding rather than stretching to a number.
+- Control information deliberately: answer some active reader questions, deepen others through concrete evidence, and do not manufacture twists by hiding facts the viewpoint should know.
+- Preserve the user's voice, viewpoint, prohibitions, proportions, and current direction. Genre convention is only a default when the governed context is silent.
+- End a chapter after a material change or fresh pressure, not with a mechanical cliffhanger formula. Show the after-effect of major payoffs before starting another escalation cycle.
+- Use references as evidence for craft or facts only. Do not reproduce source wording, names, scene order, or signature combinations.
+- During review or revision, diagnose and repair the smallest layer that actually causes the problem. A formatting failure is not evidence that the prose is bad.

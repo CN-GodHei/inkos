@@ -33,7 +33,6 @@ import { PlayStore } from "../play/play-store.js";
 import type { AgentContext } from "../agents/base.js";
 import {
   ActionPayloadSchema,
-  isUsablePlayInitialScene,
   shortRunCharsPerChapterError,
   shortRunCharsPerChapterRange,
   type ActionPayload,
@@ -44,6 +43,7 @@ import {
   runAsWorkflowTrajectory,
   runWithAgentTrajectoryRole,
 } from "../llm/agent-trajectory.js";
+import type { ActivatedSkillGuidance } from "./skill-tool.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -404,7 +404,7 @@ function compactPlayStartPayload(value: ProposeActionParamsType["playStart"]): N
   if (visualContract) out.visualContract = visualContract;
   if (value.mode) out.mode = value.mode;
   const initialScene = value.initialScene?.trim();
-  if (isUsablePlayInitialScene(initialScene)) out.initialScene = initialScene;
+  if (initialScene) out.initialScene = initialScene;
   const suggestedActions = normalizeSuggestedActions(value.suggestedActions);
   if (suggestedActions.length > 0) out.suggestedActions = suggestedActions;
   return Object.keys(out).length > 0 ? out : undefined;
@@ -660,21 +660,39 @@ function prepareSubAgentArguments(args: unknown): SubAgentParamsType {
   return prepared as SubAgentParamsType;
 }
 
+function runPipelineWithAgentContext<T>(
+  pipeline: PipelineRunner,
+  signal: AbortSignal | undefined,
+  activatedSkills: ReadonlyArray<ActivatedSkillGuidance>,
+  task: () => Promise<T>,
+): Promise<T> {
+  // PipelineRunner owns cancellation and professional-guidance scope. The
+  // fallback keeps lightweight embedders/test doubles source-compatible.
+  const runner = pipeline as PipelineRunner & {
+    runWithAgentContext?: <R>(
+      context: {
+        readonly signal?: AbortSignal;
+        readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
+      },
+      activeTask: () => Promise<R>,
+    ) => Promise<R>;
+    runWithAbortSignal?: <R>(activeSignal: AbortSignal | undefined, activeTask: () => Promise<R>) => Promise<R>;
+  };
+  return runAsWorkflowTrajectory(() => (
+    runner.runWithAgentContext
+      ? runner.runWithAgentContext({ signal, activatedSkills }, task)
+      : runner.runWithAbortSignal
+      ? runner.runWithAbortSignal(signal, task)
+      : task()
+  ));
+}
+
 function runPipelineWithAbortSignal<T>(
   pipeline: PipelineRunner,
   signal: AbortSignal | undefined,
   task: () => Promise<T>,
 ): Promise<T> {
-  // PipelineRunner owns the async cancellation scope. The fallback keeps
-  // lightweight embedders/test doubles source-compatible.
-  const runner = pipeline as PipelineRunner & {
-    runWithAbortSignal?: <R>(activeSignal: AbortSignal | undefined, activeTask: () => Promise<R>) => Promise<R>;
-  };
-  return runAsWorkflowTrajectory(() => (
-    runner.runWithAbortSignal
-      ? runner.runWithAbortSignal(signal, task)
-      : task()
-  ));
+  return runPipelineWithAgentContext(pipeline, signal, [], task);
 }
 
 export function createSubAgentTool(
@@ -685,6 +703,8 @@ export function createSubAgentTool(
     readonly actionPayload?: ActionPayload;
     readonly architectCreateOnly?: boolean;
     readonly language?: "zh" | "en";
+    readonly activeSkills?: () => ReadonlyArray<ActivatedSkillGuidance>;
+    readonly workerSkills?: (agent: string) => ReadonlyArray<ActivatedSkillGuidance>;
   } = {},
 ): AgentTool<any> {
   const sessionIsZh = (options.language ?? "zh") !== "en";
@@ -706,6 +726,11 @@ export function createSubAgentTool(
     ): Promise<AgentToolResult<unknown>> {
       return runWithAgentTrajectoryRole("subagent", async () => {
         const { agent, instruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, revise, feedback, mode, format, approvedOnly } = params;
+        const activatedSkills = mergeActivatedSkills(
+          options.workerSkills?.(agent) ?? [],
+          options.activeSkills?.() ?? [],
+        );
+        const skillIds = activatedSkills.map((activation) => activation.skill.id);
 
         const progress = (msg: string) => {
           onUpdate?.(textResult(msg));
@@ -735,9 +760,10 @@ export function createSubAgentTool(
               }
               const targetBookId = resolveToolBookId("architect", bookId, activeBookId);
               progress(`Revising foundation for "${targetBookId}"...`);
-              await runPipelineWithAbortSignal(
+              await runPipelineWithAgentContext(
                 pipeline,
                 _signal,
+                activatedSkills,
                 () => pipeline.reviseFoundation(targetBookId, feedback ?? instruction),
               );
               progress(`Foundation revised for "${targetBookId}".`);
@@ -760,9 +786,10 @@ export function createSubAgentTool(
             const now = new Date().toISOString();
             const resolvedLanguage = createBookPayload?.language ?? language ?? inferLanguage(instruction);
             progress(`Starting architect for book "${id}"...`);
-            await runPipelineWithAbortSignal(
+            await runPipelineWithAgentContext(
               pipeline,
               _signal,
+              activatedSkills,
               () => pipeline.initBook(
                 {
                   id,
@@ -782,7 +809,7 @@ export function createSubAgentTool(
             progress(`Architect finished — book "${id}" foundation created.`);
             return textResult(
               `Book "${resolvedTitle}" (${id}) initialised successfully. Foundation files are ready.`,
-              { kind: "book_created", bookId: id, title: resolvedTitle },
+              { kind: "book_created", bookId: id, title: resolvedTitle, skillIds },
             );
           }
 
@@ -791,11 +818,13 @@ export function createSubAgentTool(
             const requestedCount = chapterCount ?? 1;
             if (requestedCount > 1) {
               progress(`Writing ${requestedCount} consecutive chapters for "${targetBookId}"...`);
-              const results = await runPipelineWithAbortSignal(
+              const results = await runPipelineWithAgentContext(
                 pipeline,
                 _signal,
+                activatedSkills,
                 () => pipeline.writeChapters(targetBookId, requestedCount, {
                   wordCount: chapterWordCount,
+                  externalContext: instruction,
                   onChapterComplete(result, completedCount, totalCount) {
                     progress(`Writer finished chapter ${result.chapterNumber} (${completedCount}/${totalCount}) for "${targetBookId}".`);
                   },
@@ -812,21 +841,24 @@ export function createSubAgentTool(
                   bookId: targetBookId,
                   requestedCount,
                   completedCount: results.length,
+                  skillIds,
                   chapters: results.map((result) => ({
                     chapterNumber: result.chapterNumber,
                     title: result.title,
                     wordCount: result.wordCount,
                     status: result.status,
+                    ...(result.contextTrace ? { contextTrace: result.contextTrace } : {}),
                   })),
                   ...(stoppedStatus ? { stoppedStatus } : {}),
                 },
               );
             }
             progress(`Writing next chapter for "${targetBookId}"...`);
-            const result = await runPipelineWithAbortSignal(
+            const result = await runPipelineWithAgentContext(
               pipeline,
               _signal,
-              () => pipeline.writeNextChapter(targetBookId, chapterWordCount),
+              activatedSkills,
+              () => pipeline.writeNextChapter(targetBookId, chapterWordCount, undefined, instruction),
             );
             progress(`Writer finished chapter for "${targetBookId}".`);
             const resultStatus = (result as any).status;
@@ -845,6 +877,8 @@ export function createSubAgentTool(
                 title: titleResult,
                 wordCount,
                 status: resultStatus,
+                skillIds,
+                ...(result.contextTrace ? { contextTrace: result.contextTrace } : {}),
               },
             );
           }
@@ -852,9 +886,10 @@ export function createSubAgentTool(
           case "auditor": {
             const targetBookId = resolveToolBookId("auditor", bookId, activeBookId);
             progress(`Auditing chapter ${chapterNumber ?? "latest"} for "${targetBookId}"...`);
-            const audit = await runPipelineWithAbortSignal(
+            const audit = await runPipelineWithAgentContext(
               pipeline,
               _signal,
+              activatedSkills,
               () => pipeline.auditDraft(targetBookId, chapterNumber),
             );
             progress(`Audit complete for "${targetBookId}".`);
@@ -864,6 +899,14 @@ export function createSubAgentTool(
             return textResult(
               `Audit chapter ${audit.chapterNumber}: ${audit.passed ? "PASSED" : "FAILED"}, ${(audit.issues ?? []).length} issue(s).` +
               (issueLines ? `\n${issueLines}` : ""),
+              {
+                kind: "chapter_audit",
+                bookId: targetBookId,
+                chapterNumber: audit.chapterNumber,
+                passed: audit.passed,
+                issueCount: (audit.issues ?? []).length,
+                skillIds,
+              },
             );
           }
 
@@ -871,9 +914,10 @@ export function createSubAgentTool(
             const targetBookId = resolveToolBookId("reviser", bookId, activeBookId);
             const resolvedMode: ReviseMode = (mode as ReviseMode) ?? "spot-fix";
             progress(`Revising "${targetBookId}" chapter ${chapterNumber ?? "latest"} in ${resolvedMode} mode...`);
-            const result = await runPipelineWithAbortSignal(
+            const result = await runPipelineWithAgentContext(
               pipeline,
               _signal,
+              activatedSkills,
               () => pipeline.reviseDraft(targetBookId, chapterNumber, resolvedMode, instruction),
             );
             const applied = result.applied !== false;
@@ -889,6 +933,7 @@ export function createSubAgentTool(
               fixedIssues: result.fixedIssues,
               skippedReason: result.skippedReason,
               revisionDiagnostics: result.revisionDiagnostics,
+              skillIds,
             };
             if (!applied) {
               progress(`Revision not applied for "${targetBookId}".`);
@@ -923,16 +968,10 @@ export function createSubAgentTool(
           case "exporter": {
             const targetBookId = resolveToolBookId("exporter", bookId, activeBookId);
             if (!projectRoot) return textResult("Error: exporter requires projectRoot.");
-            const inferredFormat = format ?? (/epub/i.test(instruction)
-              ? "epub"
-              : /markdown|\bmd\b/i.test(instruction)
-                ? "md"
-                : "txt");
-            const exportApprovedOnly = approvedOnly ?? /approved|已通过|通过章节/.test(instruction);
             const state = new StateManager(projectRoot);
             const result = await writeExportArtifact(state, targetBookId, {
-              format: inferredFormat,
-              approvedOnly: exportApprovedOnly,
+              format: format ?? "txt",
+              approvedOnly: approvedOnly ?? false,
             });
             return textResult(
               `Exported "${targetBookId}": ${result.chaptersExported} chapters, ${result.totalWords} words → ${result.outputPath}`,
@@ -966,6 +1005,16 @@ export function createSubAgentTool(
       }, toolCallId);
     },
   };
+}
+
+function mergeActivatedSkills(
+  ...groups: ReadonlyArray<ReadonlyArray<ActivatedSkillGuidance>>
+): ActivatedSkillGuidance[] {
+  const merged = new Map<string, ActivatedSkillGuidance>();
+  for (const group of groups) {
+    for (const activation of group) merged.set(activation.skill.id, activation);
+  }
+  return [...merged.values()];
 }
 
 // ---------------------------------------------------------------------------
@@ -2099,9 +2148,7 @@ export function createPlayStartTool(
       const premise = playPayload?.premise ?? params.premise;
       const worldContract = playPayload?.worldContract ?? params.worldContract;
       const visualContract = playPayload?.visualContract ?? params.visualContract;
-      const initialScene = isUsablePlayInitialScene(playPayload?.initialScene)
-        ? playPayload?.initialScene
-        : params.initialScene;
+      const initialScene = playPayload?.initialScene?.trim() || params.initialScene;
       const playLanguage = inferLanguage([title, premise, worldContract, visualContract, initialScene].filter(Boolean).join("\n"));
       const world = await store.createWorld({
         id: worldId,

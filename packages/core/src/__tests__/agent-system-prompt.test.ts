@@ -21,8 +21,7 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("当前正在处理书籍「my-book」");
       expect(prompt).toContain("sub_agent");
       expect(prompt).toContain("writer");
-      expect(prompt).toContain("角色卡编辑走 write_truth_file");
-      expect(prompt).toContain("roles/主要角色/<角色名>.md");
+      expect(prompt).toContain("修改设定或角色卡时先读取权威文件");
     });
 
     it("English plain chat also has no production tool instructions", () => {
@@ -424,26 +423,20 @@ describe("buildAgentSystemPrompt", () => {
   });
 
   describe("book mode", () => {
-    it("contains active-book writing tools and no cross-mode production tools", () => {
+    it("keeps structural action boundaries without duplicating tool schemas", () => {
       const prompt = buildAgentSystemPrompt("my-book", "zh", "book");
       expect(prompt).toContain("my-book");
       expect(prompt).toContain("sub_agent");
       expect(prompt).toContain("writer");
       expect(prompt).toContain("auditor");
       expect(prompt).toContain("reviser");
-      expect(prompt).toContain("chapterWordCount");
-      expect(prompt).toContain("chapterNumber");
-      expect(prompt).toContain("anti-detect");
-      expect(prompt).toContain("approvedOnly");
-      expect(prompt).toContain("generate_cover");
-      expect(prompt).toContain("read");
-      expect(prompt).toContain("write_truth_file");
-      expect(prompt).toContain("rename_entity");
-      expect(prompt).toContain("patch_chapter_text");
-      expect(prompt).toContain("grep");
-      expect(prompt).toContain("ls");
-      expect(prompt).toContain("outline/story_frame.md");
-      expect(prompt).toContain("roles/major/<name>.md");
+      expect(prompt).toContain("工具 schema 是参数与能力的唯一说明");
+      expect(prompt).toContain("不要把讨论猜成执行命令");
+      expect(prompt).toContain("研究报告、资料卡和检索片段只是参考");
+      expect(prompt).not.toContain("## 可用工具");
+      expect(prompt).not.toContain("chapterWordCount");
+      expect(prompt).not.toContain("approvedOnly");
+      expect(prompt).not.toContain("roles/major/<name>.md");
       expect(prompt).not.toContain("short_fiction_run");
       expect(prompt).not.toContain("play_start");
       expect(prompt).not.toContain("play_step");
@@ -452,25 +445,23 @@ describe("buildAgentSystemPrompt", () => {
 
     it("steers chapter rewrite to reviser instead of writer", () => {
       const prompt = buildAgentSystemPrompt("my-book", "zh", "book");
-      expect(prompt).toContain("改 / 修订 / 重写第 N 章");
-      expect(prompt).toContain("sub_agent(agent=\"reviser\", chapterNumber=N)");
-      expect(prompt).toContain("writer 只会续写新的下一章");
-      expect(prompt).toContain("不要用 writer");
+      expect(prompt).toContain("续写新的下一章用 writer");
+      expect(prompt).toContain("修改、重写或重修已有章节用 reviser");
+      expect(prompt).toContain("三者不可互换");
     });
 
     it("forbids answering chapter-writing requests with raw chapter prose in chat", () => {
       const prompt = buildAgentSystemPrompt("my-book", "zh", "book");
-      expect(prompt).toContain("不要在聊天回答里直接写章节正文");
-      expect(prompt).toContain("不能输出“# 第 N 章”");
-      expect(prompt).toContain("必须调用 sub_agent(agent=\"writer\")");
-      expect(prompt).toContain("sub_agent 成功返回后，本轮直接结束");
+      expect(prompt).toContain("不要在聊天正文里输出章节来冒充完成");
+      expect(prompt).toContain("sub_agent 成功后结束本轮");
+      expect(prompt).toContain("完成态只以成功工具结果为准");
     });
 
     it("English active-book prompt is also isolated", () => {
       const prompt = buildAgentSystemPrompt("novel", "en", "book");
       expect(prompt).toContain("working on book \"novel\"");
       expect(prompt).toContain("sub_agent");
-      expect(prompt).toContain("generate_cover");
+      expect(prompt).toContain("Tool schemas are the sole contract");
       expect(prompt).not.toContain("short_fiction_run");
       expect(prompt).not.toContain("play_start");
       expect(prompt).not.toMatch(/agent="architect"/);

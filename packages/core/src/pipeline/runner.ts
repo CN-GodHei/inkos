@@ -30,7 +30,7 @@ import type { AgentContext } from "../agents/base.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
-import type { ChapterMemo, ContextPackage, RuleStack } from "../models/input-governance.js";
+import type { ChapterMemo, ChapterTrace, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
 import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
@@ -55,6 +55,7 @@ import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
 import { selectBookReferenceContext } from "../references/reference-context.js";
+import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -310,6 +311,16 @@ export interface TokenUsageSummary {
   readonly totalTokens: number;
 }
 
+export interface ChapterContextTraceSummary {
+  readonly tracePath: string;
+  readonly selectedSources: ReadonlyArray<string>;
+  readonly protectedSources: ReadonlyArray<string>;
+  readonly compressibleSources: ReadonlyArray<string>;
+  readonly tokenBudget: ChapterTrace["tokenBudget"];
+  readonly retrieval?: ChapterTrace["retrieval"];
+  readonly compression?: ChapterTrace["compression"];
+}
+
 export interface ChapterPipelineResult {
   readonly chapterNumber: number;
   readonly title: string;
@@ -320,11 +331,13 @@ export interface ChapterPipelineResult {
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
   readonly tokenUsage?: TokenUsageSummary;
+  readonly contextTrace?: ChapterContextTraceSummary;
 }
 
 export interface WriteChaptersOptions {
   readonly wordCount?: number;
   readonly temperatureOverride?: number;
+  readonly externalContext?: string;
   readonly onChapterComplete?: (
     result: ChapterPipelineResult,
     completedCount: number,
@@ -442,8 +455,10 @@ export class PipelineRunner {
   private readonly state: StateManager;
   private readonly config: PipelineConfig;
   private readonly agentClients = new Map<string, LLMClient>();
-  private readonly operationContext = new AsyncLocalStorage<{ readonly signal?: AbortSignal }>();
-  private memoryIndexFallbackWarned = false;
+  private readonly operationContext = new AsyncLocalStorage<{
+    readonly signal?: AbortSignal;
+    readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
+  }>();
 
   constructor(config: PipelineConfig) {
     this.config = config;
@@ -454,15 +469,34 @@ export class PipelineRunner {
     signal: AbortSignal | undefined,
     task: () => Promise<T>,
   ): Promise<T> {
-    signal?.throwIfAborted();
-    return this.operationContext.run({ signal }, async () => {
-      signal?.throwIfAborted();
+    return this.runWithAgentContext({ signal }, task);
+  }
+
+  async runWithAgentContext<T>(
+    context: {
+      readonly signal?: AbortSignal;
+      readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
+    },
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const current = this.operationContext.getStore();
+    const merged = {
+      signal: context.signal ?? current?.signal,
+      activatedSkills: context.activatedSkills ?? current?.activatedSkills,
+    };
+    merged.signal?.throwIfAborted();
+    return this.operationContext.run(merged, async () => {
+      merged.signal?.throwIfAborted();
       return task();
     });
   }
 
   private currentAbortSignal(): AbortSignal | undefined {
     return this.operationContext.getStore()?.signal;
+  }
+
+  private currentActivatedSkills(): ReadonlyArray<ActivatedSkillGuidance> | undefined {
+    return this.operationContext.getStore()?.activatedSkills;
   }
 
   private throwIfOperationAborted(): void {
@@ -702,6 +736,7 @@ export class PipelineRunner {
       logger: this.config.logger?.child(agent),
       onStreamProgress: this.config.onStreamProgress,
       signal: this.currentAbortSignal(),
+      activatedSkills: this.currentActivatedSkills(),
     };
   }
 
@@ -1728,11 +1763,21 @@ export class PipelineRunner {
   // Full pipeline (convenience — runs draft + audit + revise in one shot)
   // ---------------------------------------------------------------------------
 
-  async writeNextChapter(bookId: string, wordCount?: number, temperatureOverride?: number): Promise<ChapterPipelineResult> {
+  async writeNextChapter(
+    bookId: string,
+    wordCount?: number,
+    temperatureOverride?: number,
+    externalContext?: string,
+  ): Promise<ChapterPipelineResult> {
     this.throwIfOperationAborted();
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
-      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, this.config.externalContext);
+      return await this._writeNextChapterLocked(
+        bookId,
+        wordCount,
+        temperatureOverride,
+        externalContext ?? this.config.externalContext,
+      );
     } finally {
       await releaseLock();
     }
@@ -1757,7 +1802,7 @@ export class PipelineRunner {
           bookId,
           options.wordCount,
           options.temperatureOverride,
-          this.config.externalContext,
+          options.externalContext ?? this.config.externalContext,
         );
         results.push(result);
         options.onChapterComplete?.(result, results.length, chapterCount);
@@ -2190,6 +2235,7 @@ export class PipelineRunner {
       lengthWarnings,
       lengthTelemetry,
       tokenUsage: totalUsage,
+      ...(writeInput.contextTrace ? { contextTrace: writeInput.contextTrace } : {}),
     };
   }
 
@@ -3061,7 +3107,9 @@ ${matrix}`,
     bookDir: string,
     chapterNumber: number,
     externalContext?: string,
-  ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "chapterMemo" | "chapterIntentData" | "contextPackage" | "ruleStack">> {
+  ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "chapterMemo" | "chapterIntentData" | "contextPackage" | "ruleStack"> & {
+    readonly contextTrace?: ChapterContextTraceSummary;
+  }> {
     if ((this.config.inputGovernanceMode ?? "v2") === "legacy") {
       return { externalContext };
     }
@@ -3081,6 +3129,29 @@ ${matrix}`,
       chapterIntentData: plan.intent,
       contextPackage: composed.contextPackage,
       ruleStack: composed.ruleStack,
+      contextTrace: {
+        tracePath: relativeToBookDir(bookDir, composed.tracePath),
+        selectedSources: [...composed.trace.selectedSources],
+        protectedSources: [...composed.trace.contextTiers.protectedSources],
+        compressibleSources: [...composed.trace.contextTiers.compressibleSources],
+        tokenBudget: { ...composed.trace.tokenBudget },
+        ...(composed.trace.retrieval ? {
+          retrieval: {
+            ...composed.trace.retrieval,
+            candidates: composed.trace.retrieval.candidates.map((candidate) => ({ ...candidate })),
+            ...(composed.trace.retrieval.semanticSelectedIds
+              ? { semanticSelectedIds: [...composed.trace.retrieval.semanticSelectedIds] }
+              : {}),
+          },
+        } : {}),
+        ...(composed.trace.compression ? {
+          compression: {
+            ...composed.trace.compression,
+            protectedSources: [...composed.trace.compression.protectedSources],
+            compressedSources: [...composed.trace.compression.compressedSources],
+          },
+        } : {}),
+      },
     };
   }
 
@@ -3239,26 +3310,6 @@ ${matrix}`,
     try {
       await this.rebuildCurrentStateFactHistory(bookDir, uptoChapter);
     } catch (error) {
-      if (this.isMemoryIndexUnavailableError(error)) {
-        if (this.canOpenMemoryIndex(bookDir)) {
-          try {
-            await this.rebuildCurrentStateFactHistory(bookDir, uptoChapter);
-            return;
-          } catch (retryError) {
-            error = retryError;
-          }
-        } else {
-          if (!this.memoryIndexFallbackWarned) {
-            this.memoryIndexFallbackWarned = true;
-            this.logWarn(await this.resolveBookLanguageById(bookId), {
-              zh: "当前 Node 运行时不支持 SQLite 记忆索引，继续使用 Markdown 回退方案。",
-              en: "SQLite memory index unavailable on this Node runtime; continuing with markdown fallback.",
-            });
-            await this.logMemoryIndexDebugInfo(bookId, error);
-          }
-          return;
-        }
-      }
       this.logWarn(await this.resolveBookLanguageById(bookId), {
         zh: `状态事实同步已跳过：${String(error)}`,
         en: `State fact sync skipped: ${String(error)}`,
@@ -3289,26 +3340,6 @@ ${matrix}`,
     try {
       await this.rebuildNarrativeMemoryIndex(bookDir);
     } catch (error) {
-      if (this.isMemoryIndexUnavailableError(error)) {
-        if (this.canOpenMemoryIndex(bookDir)) {
-          try {
-            await this.rebuildNarrativeMemoryIndex(bookDir);
-            return;
-          } catch (retryError) {
-            error = retryError;
-          }
-        } else {
-          if (!this.memoryIndexFallbackWarned) {
-            this.memoryIndexFallbackWarned = true;
-            this.logWarn(await this.resolveBookLanguageById(bookId), {
-              zh: "当前 Node 运行时不支持 SQLite 记忆索引，继续使用 Markdown 回退方案。",
-              en: "SQLite memory index unavailable on this Node runtime; continuing with markdown fallback.",
-            });
-            await this.logMemoryIndexDebugInfo(bookId, error);
-          }
-          return;
-        }
-      }
       this.logWarn(await this.resolveBookLanguageById(bookId), {
         zh: `叙事记忆同步已跳过：${String(error)}`,
         en: `Narrative memory sync skipped: ${String(error)}`,
@@ -3391,36 +3422,6 @@ ${matrix}`,
     }
   }
 
-  private canOpenMemoryIndex(bookDir: string): boolean {
-    let memoryDb: MemoryDB | null = null;
-    try {
-      memoryDb = new MemoryDB(bookDir);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      memoryDb?.close();
-    }
-  }
-
-  private async logMemoryIndexDebugInfo(bookId: string, error: unknown): Promise<void> {
-    if (process.env.INKOS_DEBUG_SQLITE_MEMORY !== "1") {
-      return;
-    }
-
-    const code = typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code ?? "")
-      : "";
-    const message = error instanceof Error
-      ? error.message
-      : String(error);
-
-    this.logWarn(await this.resolveBookLanguageById(bookId), {
-      zh: `SQLite 记忆索引调试：node=${process.version}; execArgv=${JSON.stringify(process.execArgv)}; code=${code || "(none)"}; message=${message}`,
-      en: `SQLite memory debug: node=${process.version}; execArgv=${JSON.stringify(process.execArgv)}; code=${code || "(none)"}; message=${message}`,
-    });
-  }
-
   private async withMemoryIndexRetry<T>(operation: () => Promise<T> | T): Promise<T> {
     const retryDelaysMs = [0, 25, 75];
     let lastError: unknown;
@@ -3438,22 +3439,6 @@ ${matrix}`,
     }
 
     throw lastError;
-  }
-
-  private isMemoryIndexUnavailableError(error: unknown): boolean {
-    if (!error) return false;
-
-    const code = typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code ?? "")
-      : "";
-    const message = error instanceof Error
-      ? error.message
-      : String(error);
-    const normalizedMessage = message.trim();
-
-    return /^No such built-in module:\s*node:sqlite$/i.test(normalizedMessage)
-      || /^Cannot find module ['"]node:sqlite['"]$/i.test(normalizedMessage)
-      || (code === "ERR_UNKNOWN_BUILTIN_MODULE" && /\bnode:sqlite\b/i.test(normalizedMessage));
   }
 
   private isMemoryIndexBusyError(error: unknown): boolean {
@@ -3731,6 +3716,8 @@ ${matrix}`,
       plan,
       contextBudget: contextBudgetFromClient(composerCtx.client),
       compressibleContextCompiler: (request) => composer.compileCompressibleContext(request),
+      outlineSectionSelector: (request) => composer.selectOutlineSections(request),
+      memorySemanticSelector: (request) => composer.selectMemoryCandidates(request),
       referenceContextProvider: (request) => selectBookReferenceContext(
         this.config.projectRoot,
         book.id,

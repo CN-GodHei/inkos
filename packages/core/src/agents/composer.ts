@@ -12,6 +12,9 @@ import type { PlanChapterOutput } from "./planner.js";
 import {
   parseChapterSummariesMarkdown,
   retrieveMemorySelection,
+  type MemoryRetrievalTrace,
+  type MemorySemanticSelectionRequest,
+  type MemorySemanticSelector,
 } from "../utils/memory-retrieval.js";
 import {
   buildGovernedRuleStack,
@@ -36,6 +39,7 @@ export interface ComposeChapterInput {
   readonly compressibleContextCompiler?: CompressibleContextCompiler;
   readonly outlineSectionSelector?: OutlineSectionSelector;
   readonly referenceContextProvider?: BookReferenceContextProvider;
+  readonly memorySemanticSelector?: MemorySemanticSelector;
   readonly onContextCompression?: ContextCompressionCallback;
 }
 
@@ -94,9 +98,10 @@ export async function composeGovernedChapter(input: ComposeChapterInput): Promis
     input.plan,
     input.book.language ?? "zh",
     input.outlineSectionSelector,
+    input.memorySemanticSelector,
   );
   const referenceContext = await loadReferenceContext(input);
-  const selectedContext = [...baseContext, ...referenceContext.entries];
+  const selectedContext = [...baseContext.entries, ...referenceContext.entries];
   const initialContextPackage = ContextPackageSchema.parse({
     chapter: input.chapterNumber,
     selectedContext,
@@ -120,6 +125,14 @@ export async function composeGovernedChapter(input: ComposeChapterInput): Promis
     composerInputs: [input.plan.runtimePath],
     notes: [...referenceContext.notes, ...budgeted.notes],
     compression: budgeted.compression,
+    retrieval: {
+      engine: baseContext.retrievalTrace.engine,
+      query: baseContext.retrievalTrace.query,
+      candidates: baseContext.retrievalTrace.candidates.map((candidate) => ({ ...candidate })),
+      ...(baseContext.retrievalTrace.semanticSelectedIds
+        ? { semanticSelectedIds: [...baseContext.retrievalTrace.semanticSelectedIds] }
+        : {}),
+    },
   });
   const {
     contextPath,
@@ -336,7 +349,45 @@ export class ComposerAgent extends BaseAgent {
       compressibleContextCompiler: input.compressibleContextCompiler
         ?? (contextBudget ? (request) => this.compileCompressibleContext(request) : undefined),
       outlineSectionSelector: input.outlineSectionSelector ?? ((request) => this.selectOutlineSections(request)),
+      memorySemanticSelector: input.memorySemanticSelector ?? ((request) => this.selectMemoryCandidates(request)),
     });
+  }
+
+  async selectMemoryCandidates(request: MemorySemanticSelectionRequest): Promise<ReadonlyArray<string>> {
+    const candidates = request.candidates.map((candidate, index) => [
+      `#${index + 1} ${candidate.id}`,
+      `kind: ${candidate.kind}`,
+      `source: ${candidate.source}`,
+      `title: ${candidate.title}`,
+      candidate.excerpt,
+    ].join("\n")).join("\n\n");
+    const response = await this.chat([
+      {
+        role: "system",
+        content: [
+          "You are InkOS's semantic story-memory selector.",
+          "Select only candidate memories that materially help the current chapter task. Understand negation, corrections, causal relationships, aliases, and paraphrases; do not rank by keyword overlap.",
+          "Established current-state facts and active hook lifecycle are protected separately by the host, so do not invent ids or retain unrelated candidates just to be safe.",
+          "Return strict JSON only: {\"selectedSources\":[\"candidate-id\"]}.",
+        ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          `Chapter: ${request.chapterNumber}`,
+          "Current task:",
+          request.query,
+          "",
+          "BM25 candidates:",
+          candidates,
+        ].join("\n"),
+      },
+    ], {
+      temperature: 0.1,
+      maxTokens: 2048,
+    });
+    const allowed = new Set(request.candidates.map((candidate) => candidate.id));
+    return parseSelectedSources(response.content).filter((id) => allowed.has(id));
   }
 
   async selectOutlineSections(request: OutlineSectionSelectionRequest): Promise<ReadonlyArray<string>> {
@@ -523,7 +574,11 @@ async function collectSelectedContext(
   plan: PlanChapterOutput,
   language: "zh" | "en",
   outlineSectionSelector?: OutlineSectionSelector,
-): Promise<ContextPackage["selectedContext"]> {
+  memorySemanticSelector?: MemorySemanticSelector,
+): Promise<{
+  readonly entries: ContextPackage["selectedContext"];
+  readonly retrievalTrace: MemoryRetrievalTrace;
+}> {
     const retrievalHints = deriveRetrievalHints(plan);
     const memoBodyExcerpt = plan.memo.body.trim();
     const chapterMemoEntry = memoBodyExcerpt.length > 0
@@ -604,6 +659,7 @@ async function collectSelectedContext(
       goal: plan.intent.goal,
       outlineNode: plan.intent.outlineNode,
       mustKeep: retrievalHints,
+      semanticSelector: memorySemanticSelector,
     });
     const hookDebtEntries = await buildHookDebtEntries(
       storyDir,
@@ -637,18 +693,21 @@ async function collectSelectedContext(
       excerpt: `${summary.heading} | ${summary.content}`,
     }));
 
-    return [
-      ...chapterMemoEntry,
-      ...entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
-      ...outlineEntries,
-      ...canonEntries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
-      ...trailEntries,
-      ...hookDebtEntries,
-      ...factEntries,
-      ...summaryEntries,
-      ...volumeSummaryEntries,
-      ...hookEntries,
-    ];
+    return {
+      entries: [
+        ...chapterMemoEntry,
+        ...entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
+        ...outlineEntries,
+        ...canonEntries.filter((entry): entry is NonNullable<typeof entry> => entry !== null),
+        ...trailEntries,
+        ...hookDebtEntries,
+        ...factEntries,
+        ...summaryEntries,
+        ...volumeSummaryEntries,
+        ...hookEntries,
+      ],
+      retrievalTrace: memorySelection.retrievalTrace,
+    };
 }
 
 function deriveRetrievalHints(plan: PlanChapterOutput): string[] {
