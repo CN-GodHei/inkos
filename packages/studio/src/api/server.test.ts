@@ -275,7 +275,6 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     defaultChapterLength: actual.defaultChapterLength,
     inferLanguage: actual.inferLanguage,
     ingestMaterial: actual.ingestMaterial,
-    isUsablePlayInitialScene: actual.isUsablePlayInitialScene,
     chatCompletion: chatCompletionMock,
     loadProjectConfig: loadProjectConfigMock,
     processProjectInteractionRequest: processProjectInteractionRequestMock,
@@ -342,8 +341,6 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     SessionKindSchema: actual.SessionKindSchema,
     DetectionConfigSchema: actual.DetectionConfigSchema,
     InputGovernanceModeSchema: actual.InputGovernanceModeSchema,
-    isExplicitWriteChapterCommand: actual.isExplicitWriteChapterCommand,
-    isWriteNextInstruction: actual.isWriteNextInstruction,
     normalizeActionSource: actual.normalizeActionSource,
     normalizeActionPayload: actual.normalizeActionPayload,
     normalizePlayMode: actual.normalizePlayMode,
@@ -4401,7 +4398,7 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
-  it("falls back from a truncated confirmed play-start scene to the complete user instruction", async () => {
+  it("preserves the confirmed play-start scene without guessing whether its prose is complete", async () => {
     const playSession = {
       sessionId: "play-session-truncated",
       bookId: null,
@@ -4442,10 +4439,9 @@ describe("createStudioServer daemon lifecycle", () => {
     const body = await response.json();
     expect(response.status, JSON.stringify(body)).toBe(200);
     expect(body.response).toBe("");
-    expect(body.details?.toolExecutions?.[0]?.result).toContain("主演栏写着赵铁生");
-    expect(body.details?.toolExecutions?.[0]?.result).not.toContain("主演栏里有个名字叫");
+    expect(body.details?.toolExecutions?.[0]?.result).toContain("主演栏里有个名字叫");
     await expect(readFile(join(root, "worlds", "play-session-truncated", "runs", "main", "projections", "scene.md"), "utf-8"))
-      .resolves.toContain("主演栏写着赵铁生");
+      .resolves.toContain("主演栏里有个名字叫");
   });
 
   it("routes write-next button instructions directly to the shared writer pipeline", async () => {
@@ -4811,7 +4807,7 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   });
 
-  it("direct-runs explicit free-text chapter writing commands for the active book", async () => {
+  it("routes explicit free-text chapter writing requests through the Pi agent", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -4827,17 +4823,12 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     });
 
-    const body = await response.json();
-    expect(response.status, JSON.stringify(body)).toBe(200);
-    expect(body).toMatchObject({
-      response: expect.stringContaining("已为 demo-book 完成第 3 章"),
-      session: {
-        sessionId: "agent-session-1",
-        activeBookId: "demo-book",
-      },
-    });
-    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book");
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ bookId: "demo-book", sessionKind: "book" }),
+      "开始写第一章。写完后落盘，不要只在聊天里给我正文。",
+    );
   }, 60_000);
 
   it("forwards playMode to runAgentSession for play sessions", async () => {
@@ -4885,18 +4876,7 @@ describe("createStudioServer daemon lifecycle", () => {
     }));
   });
 
-  it("handles explicit chat chapter edits outside the InkOS writing agent", async () => {
-    loadChapterIndexMock.mockResolvedValueOnce([{
-      number: 3,
-      title: "Demo",
-      status: "ready-for-review",
-      wordCount: 4,
-      createdAt: "2026-04-12T00:00:00.000Z",
-      updatedAt: "2026-04-12T00:00:00.000Z",
-      auditIssues: [],
-      lengthWarnings: [],
-    }]);
-
+  it("routes explicit chapter edit requests through the Pi agent", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -4914,80 +4894,16 @@ describe("createStudioServer daemon lifecycle", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      response: expect.stringContaining("已直接编辑 demo-book 第 3 章"),
-      session: {
-        sessionId: "agent-session-1",
-        activeBookId: "demo-book",
-      },
+      response: "Agent response.",
     });
     await expect(readFile(join(root, "books", "demo-book", "chapters", "0003_Demo.md"), "utf-8"))
-      .resolves.toContain("Body updated");
-    expect(saveChapterIndexMock).toHaveBeenCalledWith("demo-book", [
-      expect.objectContaining({
-        number: 3,
-        status: "audit-failed",
-        wordCount: expect.any(Number),
-        auditIssues: expect.arrayContaining(["[warning] Chat external edit requires review before continuation."]),
-      }),
-    ]);
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
-    expect(writeNextChapterMock).not.toHaveBeenCalled();
-  });
-
-  it("handles explicit chat artifact edits only for content roots", async () => {
-    await mkdir(join(root, "covers", "demo"), { recursive: true });
-    await writeFile(join(root, "covers", "demo", "cover-prompt.md"), "标题字太小。\n", "utf-8");
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction: "把 covers/demo/cover-prompt.md 里的「标题字太小」改成「标题字压到最大」",
-        sessionId: "agent-session-1",
-        sessionKind: "edit",
-        requestedIntent: "edit_artifact",
-      }),
-    });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      response: expect.stringContaining("已直接编辑 covers/demo/cover-prompt.md"),
-    });
-    await expect(readFile(join(root, "covers", "demo", "cover-prompt.md"), "utf-8"))
-      .resolves.toContain("标题字压到最大");
+      .resolves.not.toContain("Body updated");
     expect(saveChapterIndexMock).not.toHaveBeenCalled();
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
-  });
-
-  it("handles explicit chat edits against role-card truth files", async () => {
-    const rolePath = join(root, "books", "demo-book", "story", "roles", "主要角色", "林月.md");
-    await mkdir(join(root, "books", "demo-book", "story", "roles", "主要角色"), { recursive: true });
-    await writeFile(rolePath, "# 林月\n\n- 动机：守住旧账册。\n", "utf-8");
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction: "把 books/demo-book/story/roles/主要角色/林月.md 里的「守住旧账册」改成「查清账册里的失踪名单」",
-        activeBookId: "demo-book",
-        sessionId: "agent-session-1",
-        sessionKind: "edit",
-        requestedIntent: "edit_artifact",
-      }),
-    });
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      response: expect.stringContaining("已直接编辑 books/demo-book/story/roles/主要角色/林月.md"),
-    });
-    await expect(readFile(rolePath, "utf-8")).resolves.toContain("查清账册里的失踪名单");
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
+    expect(runAgentSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionKind: "edit", bookId: "demo-book" }),
+      "第3章把「Body」改成「Body updated」",
+    );
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
   });
 
   it("does not bypass the agent for edit-shaped questions", async () => {
@@ -5014,32 +4930,6 @@ describe("createStudioServer daemon lifecycle", () => {
       .resolves.toBe("标题字太小。\n");
     expect(runAgentSessionMock).toHaveBeenCalledOnce();
     expect(appendManualSessionMessagesMock).not.toHaveBeenCalled();
-  });
-
-  it("rejects chat artifact edits against source files instead of routing to the agent", async () => {
-    await mkdir(join(root, "packages", "core", "src"), { recursive: true });
-    await writeFile(join(root, "packages", "core", "src", "index.ts"), "export const value = 1;\n", "utf-8");
-
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        instruction: "把 packages/core/src/index.ts 里的「value」改成「other」",
-        sessionId: "agent-session-1",
-        sessionKind: "edit",
-        requestedIntent: "edit_artifact",
-      }),
-    });
-
-    expect(response.status).toBe(400);
-    const body = await response.json() as { error: { code: string } };
-    expect(body.error.code).toBe("UNSUPPORTED_CHAT_EDIT_TARGET");
-    await expect(readFile(join(root, "packages", "core", "src", "index.ts"), "utf-8"))
-      .resolves.toContain("value");
-    expect(runAgentSessionMock).not.toHaveBeenCalled();
   });
 
   it("rejects unsafe activeBookId in the Studio agent API", async () => {

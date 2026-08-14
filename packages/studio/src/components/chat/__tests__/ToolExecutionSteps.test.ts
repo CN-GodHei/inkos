@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ToolExecution } from "../../../store/chat/types";
-import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
+import { PipelineResultDetails, ToolExecutionSteps, UtilityExecutionRow, buildPlayRunStatusUrl, buildPlaySceneImageUrl, getChapterContextTraceDetails, getGeneratedArtifactDetails, getPlayEditDetails, getPlayToolDetails, getProposedActionContractRows, getProposedActionDetails, groupToolExecutionsChronologically } from "../ToolExecutionSteps";
 import { usePreferencesStore } from "../../../store/preferences";
 import { setAppLanguage } from "../../../lib/app-language";
 
@@ -177,6 +177,50 @@ describe("groupChronologically", () => {
 
     expect(html).toContain("查看操作结果");
     expect(html).toContain("已完成第 1 章：雨棚");
+  });
+
+  it("renders the writer retrieval trace from structured tool details", () => {
+    const exec = makeExec({
+      id: "writer-trace",
+      tool: "sub_agent",
+      agent: "writer",
+      label: "写下一章",
+      details: {
+        kind: "chapter_written",
+        chapterNumber: 8,
+        skillIds: ["longform-pacing"],
+        contextTrace: {
+          tracePath: "runtime/chapter-0008.trace.json",
+          selectedSources: ["story/author_intent.md", "story/pending_hooks.md#H7"],
+          protectedSources: ["story/author_intent.md"],
+          compressibleSources: ["story/pending_hooks.md#H7"],
+          tokenBudget: { protectedTokens: 1200, compressibleTokens: 800, totalSelectedTokens: 2000 },
+          retrieval: {
+            engine: "sqlite-fts5-bm25",
+            query: "第八章 证据反噬",
+            candidates: [{ id: "H7", kind: "hook", source: "story/pending_hooks.md#H7", score: 1.4 }],
+            semanticSelectedIds: ["H7"],
+          },
+          compression: {
+            compiledSource: "runtime/compiled-compressible-context",
+            protectedSources: ["story/author_intent.md"],
+            compressedSources: ["story/pending_hooks.md#H7"],
+            protectedTokens: 1200,
+            compressibleTokens: 800,
+            budgetTokens: 1800,
+          },
+        },
+      },
+    });
+
+    expect(getChapterContextTraceDetails(exec)).toHaveLength(1);
+    const html = renderToStaticMarkup(React.createElement(ToolExecutionSteps, { executions: [exec] }));
+    expect(html).toContain("本轮参考依据");
+    expect(html).toContain("longform-pacing");
+    expect(html).toContain("sqlite-fts5-bm25");
+    expect(html).toContain("story/author_intent.md");
+    expect(html).toContain("runtime/chapter-0008.trace.json");
+    expect(html).toContain("语义压缩");
   });
 
   it("extracts generated cover details from public short fiction tools", () => {

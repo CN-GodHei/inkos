@@ -60,9 +60,6 @@ import {
   normalizeCoverBaseUrl,
   resolveCoverProviderPreset,
   SessionKindSchema,
-  isExplicitWriteChapterCommand,
-  isUsablePlayInitialScene,
-  isWriteNextInstruction,
   normalizeActionSource as normalizeCoreActionSource,
   normalizeActionPayload as normalizeCoreActionPayload,
   normalizePlayMode as normalizeCorePlayMode,
@@ -996,236 +993,6 @@ function normalizeStudioPlayMode(value: unknown): PlayMode | undefined {
   }
 }
 
-// 判断"这次请求要不要把写下一章当成确认式生产任务执行"。
-// 命中的三种来源（显式 write_next intent / free-text 明确写章命令 / 其它来源的
-// 写作指令启发式）全部走确认式任务分支：有 taskId、AbortController、磁盘快照，
-// 可中止、可在刷新后恢复。没有书或不在书籍会话时交给聊天 agent 处理。
-function isWriteNextProductionRequest(args: {
-  readonly instruction: string;
-  readonly agentBookId: string | null | undefined;
-  readonly sessionKind: SessionKind;
-  readonly actionSource: ActionSource;
-  readonly requestedIntent?: RequestedIntent;
-}): boolean {
-  if (!args.agentBookId || args.sessionKind !== "book") return false;
-  if (args.requestedIntent === "write_next") return true;
-  if (args.actionSource === "free-text") return isExplicitWriteChapterCommand(args.instruction);
-  return isWriteNextInstruction(args.instruction);
-}
-
-type ExternalChatEditResult = {
-  readonly responseText: string;
-  readonly activeBookId?: string;
-};
-
-const CHAT_EDIT_WARNING = "[warning] Chat external edit requires review before continuation.";
-const CHAT_EDIT_TEXT_EXTENSIONS = /\.(md|txt|json|ya?ml)$/i;
-const CHAT_EDIT_ALLOWED_ROOTS = new Set(["books", "shorts", "covers", "genres"]);
-
-function parseReplacementInstruction(instruction: string): { oldText: string; newText: string } | null {
-  const inFileQuoted = instruction.match(/(?:里|里的|中|中的|里面)\s*[「“"]([\s\S]+?)[」”"]\s*(?:改成|替换成|换成)\s*[「“"]([\s\S]+?)[」”"]/);
-  if (inFileQuoted?.[1] && inFileQuoted[2] !== undefined) {
-    return { oldText: inFileQuoted[1], newText: inFileQuoted[2] };
-  }
-  const quoted = instruction.match(/(?:把|将)\s*[「“"]([\s\S]+?)[」”"]\s*(?:改成|替换成|换成)\s*[「“"]([\s\S]+?)[」”"]/);
-  if (quoted?.[1] && quoted[2] !== undefined) {
-    return { oldText: quoted[1], newText: quoted[2] };
-  }
-  const plain = instruction.match(/(?:把|将)\s+([^\s，。；;]+)\s*(?:改成|替换成|换成)\s+([^\n，。；;]+)/);
-  if (plain?.[1] && plain[2] !== undefined) {
-    return { oldText: plain[1], newText: plain[2].trim() };
-  }
-  return null;
-}
-
-function isExplicitExternalChatEditInstruction(instruction: string): boolean {
-  const trimmed = instruction.trim();
-  if (!trimmed) return false;
-  if (/[?？]\s*$/.test(trimmed)) return false;
-  if (/^(?:请问|能否|能不能|可以|可不可以|是否|是不是|怎么|怎样|为什么|如果|假如|要不要|建议|讨论)\b/u.test(trimmed)) {
-    return false;
-  }
-
-  const imperative = trimmed.replace(/^(?:请|麻烦|帮我|直接|现在)\s*/u, "");
-  return /^(?:第\s*\d{1,4}\s*章\s*)?(?:把|将)\s*/u.test(imperative);
-}
-
-function parseChapterNumberForEdit(instruction: string): number | null {
-  const match = instruction.match(/第\s*(\d{1,4})\s*章/);
-  if (!match?.[1]) return null;
-  const chapterNumber = Number.parseInt(match[1], 10);
-  return Number.isInteger(chapterNumber) && chapterNumber > 0 ? chapterNumber : null;
-}
-
-function parseExplicitEditPath(instruction: string): string | null {
-  const match = instruction.match(/(?:把|将)\s+([^「“"\s，。；;]+?\.[A-Za-z0-9]+)\s*(?:里|里的|中|中的|里面)/);
-  return match?.[1]?.trim() ?? null;
-}
-
-function countContentUnits(content: string): number {
-  const stripped = content
-    .replace(/^#{1,6}\s+.*$/gm, "")
-    .trim();
-  if (!stripped) return 0;
-  if (/[\u3400-\u9fff]/.test(stripped)) {
-    return stripped.replace(/\s/g, "").length;
-  }
-  return stripped.split(/\s+/).filter(Boolean).length;
-}
-
-function resolveExternalChatEditPath(root: string, requestedPath: string): { path: string; rel: string } {
-  if (isAbsolute(requestedPath)) {
-    throw new ApiError(400, "UNSUPPORTED_CHAT_EDIT_TARGET", "Chat external edits only support project-relative content paths.");
-  }
-  const projectRoot = resolve(root);
-  const resolved = resolve(projectRoot, requestedPath);
-  const rel = relative(projectRoot, resolved).replace(/\\/g, "/");
-  if (!rel || rel.startsWith("../") || rel === "..") {
-    throw new ApiError(400, "UNSUPPORTED_CHAT_EDIT_TARGET", "Chat external edit path escapes the project root.");
-  }
-  const first = rel.split("/")[0] ?? "";
-  if (!CHAT_EDIT_ALLOWED_ROOTS.has(first)) {
-    throw new ApiError(400, "UNSUPPORTED_CHAT_EDIT_TARGET", "Chat external edits cannot modify source code, config, or arbitrary project files.");
-  }
-  if (rel.includes("/.inkos/") || rel.endsWith("/.inkos") || rel.includes("/secrets") || rel.endsWith(".env")) {
-    throw new ApiError(400, "UNSUPPORTED_CHAT_EDIT_TARGET", "Chat external edits cannot modify secrets or runtime internals.");
-  }
-  if (!CHAT_EDIT_TEXT_EXTENSIONS.test(rel)) {
-    throw new ApiError(400, "UNSUPPORTED_CHAT_EDIT_TARGET", "Chat external edits only support text content files.");
-  }
-  return { path: resolved, rel };
-}
-
-async function findChapterFile(root: string, bookId: string, chapterNumber: number): Promise<string | null> {
-  const chaptersDir = join(root, "books", bookId, "chapters");
-  const padded = String(chapterNumber).padStart(4, "0");
-  const files = await readdir(chaptersDir).catch(() => []);
-  const match = files.find((file) => file.startsWith(`${padded}_`) && file.endsWith(".md"));
-  return match ? join(chaptersDir, match) : null;
-}
-
-function parseBookChapterFromRelativePath(rel: string): { bookId: string; chapterNumber: number } | null {
-  const match = rel.match(/^books\/([^/]+)\/chapters\/(\d{4})_[^/]+\.md$/);
-  if (!match?.[1] || !match[2]) return null;
-  const chapterNumber = Number.parseInt(match[2], 10);
-  return Number.isInteger(chapterNumber) ? { bookId: match[1], chapterNumber } : null;
-}
-
-async function syncExternalChapterEdit(params: {
-  readonly state: StateManager;
-  readonly root: string;
-  readonly bookId: string;
-  readonly chapterNumber: number;
-  readonly content: string;
-}): Promise<void> {
-  const now = new Date().toISOString();
-  const index = [...(await params.state.loadChapterIndex(params.bookId))];
-  const updated = index.map((chapter) => chapter.number === params.chapterNumber
-    ? {
-        ...chapter,
-        status: "audit-failed" as const,
-        wordCount: countContentUnits(params.content),
-        updatedAt: now,
-        auditIssues: [
-          ...chapter.auditIssues.filter((issue) => issue !== CHAT_EDIT_WARNING),
-          CHAT_EDIT_WARNING,
-        ],
-      }
-    : chapter);
-  if (updated.length > 0) {
-    await params.state.saveChapterIndex(params.bookId, updated);
-  }
-
-  const runtimeDir = join(params.root, "books", params.bookId, "story", "runtime");
-  const padded = String(params.chapterNumber).padStart(4, "0");
-  const runtimeFiles = await readdir(runtimeDir).catch(() => []);
-  await Promise.all(
-    runtimeFiles
-      .filter((file) => file.startsWith(`chapter-${padded}.`))
-      .map((file) => rm(join(runtimeDir, file), { force: true })),
-  );
-}
-
-async function tryHandleExternalChatEdit(params: {
-  readonly root: string;
-  readonly state: StateManager;
-  readonly instruction: string;
-  readonly activeBookId: string | null;
-}): Promise<ExternalChatEditResult | null> {
-  const replacement = parseReplacementInstruction(params.instruction);
-  if (!replacement) return null;
-  if (!isExplicitExternalChatEditInstruction(params.instruction)) return null;
-
-  const explicitPath = parseExplicitEditPath(params.instruction);
-  if (explicitPath) {
-    const target = resolveExternalChatEditPath(params.root, explicitPath);
-    const content = await readFile(target.path, "utf-8").catch((error) => {
-      throw new ApiError(404, "CHAT_EDIT_TARGET_NOT_FOUND", error instanceof Error ? error.message : String(error));
-    });
-    const first = content.indexOf(replacement.oldText);
-    if (first === -1) {
-      throw new ApiError(400, "EDIT_TARGET_NOT_FOUND", "要替换的原文没有在目标文件中找到。");
-    }
-    if (content.indexOf(replacement.oldText, first + replacement.oldText.length) !== -1) {
-      throw new ApiError(400, "EDIT_TARGET_AMBIGUOUS", "要替换的原文出现多次，请给出更具体的一段。");
-    }
-    const updated = content.slice(0, first) + replacement.newText + content.slice(first + replacement.oldText.length);
-    await writeFile(target.path, updated, "utf-8");
-
-    const chapterTarget = parseBookChapterFromRelativePath(target.rel);
-    if (chapterTarget) {
-      await syncExternalChapterEdit({
-        state: params.state,
-        root: params.root,
-        bookId: chapterTarget.bookId,
-        chapterNumber: chapterTarget.chapterNumber,
-        content: updated,
-      });
-    }
-
-    return {
-      activeBookId: chapterTarget?.bookId ?? params.activeBookId ?? undefined,
-      responseText: `已直接编辑 ${target.rel}${chapterTarget ? "，并标记为需要复核" : ""}。`,
-    };
-  }
-
-  if (!params.activeBookId) return null;
-  const chapterNumber = parseChapterNumberForEdit(params.instruction);
-  if (!replacement || !chapterNumber) return null;
-
-  const chapterPath = await findChapterFile(params.root, params.activeBookId, chapterNumber);
-  if (!chapterPath) {
-    throw new ApiError(404, "CHAPTER_NOT_FOUND", `Chapter ${chapterNumber} not found in ${params.activeBookId}`);
-  }
-  if (!CHAT_EDIT_TEXT_EXTENSIONS.test(chapterPath)) {
-    throw new ApiError(400, "UNSUPPORTED_EDIT_TARGET", "Chat external edits only support text files.");
-  }
-
-  const content = await readFile(chapterPath, "utf-8");
-  const first = content.indexOf(replacement.oldText);
-  if (first === -1) {
-    throw new ApiError(400, "EDIT_TARGET_NOT_FOUND", "要替换的原文没有在目标章节中找到。");
-  }
-  if (content.indexOf(replacement.oldText, first + replacement.oldText.length) !== -1) {
-    throw new ApiError(400, "EDIT_TARGET_AMBIGUOUS", "要替换的原文出现多次，请给出更具体的一段。");
-  }
-
-  const updated = content.slice(0, first) + replacement.newText + content.slice(first + replacement.oldText.length);
-  await writeFile(chapterPath, updated, "utf-8");
-  await syncExternalChapterEdit({
-    state: params.state,
-    root: params.root,
-    bookId: params.activeBookId,
-    chapterNumber,
-    content: updated,
-  });
-
-  return {
-    activeBookId: params.activeBookId,
-    responseText: `已直接编辑 ${params.activeBookId} 第 ${chapterNumber} 章，并标记为需要复核。`,
-  };
-}
-
 function validateAgentActionExecution(args: {
   readonly instruction: string;
   readonly agentBookId: string | null | undefined;
@@ -1424,9 +1191,13 @@ function isConfirmedProductionAction(args: {
   readonly actionSource: ActionSource;
   readonly requestedIntent?: RequestedIntent;
 }): boolean {
-  return (args.actionSource === "button" || args.actionSource === "slash")
+  const confirmedSource = args.actionSource === "button"
+    || args.actionSource === "slash"
+    || (args.actionSource === "quick-action" && args.requestedIntent === "write_next");
+  return confirmedSource
     && (
-      args.requestedIntent === "create_book"
+      args.requestedIntent === "write_next"
+    || args.requestedIntent === "create_book"
     || args.requestedIntent === "short_run"
     || args.requestedIntent === "script_create"
     || args.requestedIntent === "storyboard_create"
@@ -1756,9 +1527,7 @@ async function executeConfirmedProductionAction(args: {
     const payload = actionPayload?.playStart;
     const title = requirePayloadText(payload?.title, pick(lang, "确认启动互动世界缺少标题，请重新生成确认卡。", "The interactive world start confirmation is missing a title. Regenerate the confirmation card."));
     const fallbackScene = [payload?.premise, args.instruction].filter((part): part is string => typeof part === "string" && part.trim().length > 0).join("\n\n");
-    const initialScene = isUsablePlayInitialScene(payload?.initialScene)
-      ? payload?.initialScene?.trim()
-      : fallbackScene.trim();
+    const initialScene = payload?.initialScene?.trim() || fallbackScene.trim();
     const confirmedActionPayload: ActionPayload | undefined = actionPayload
       ? {
         ...actionPayload,
@@ -5003,44 +4772,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         }
       };
 
-      const externalEdit = requestedIntent === "edit_artifact" || sessionKind === "edit"
-        ? await tryHandleExternalChatEdit({
-            root,
-            state,
-            instruction,
-            activeBookId: agentBookId,
-          })
-        : null;
-      if (externalEdit) {
-        await appendSessionMessagesUnlessDeleted(root, bookSession.sessionId, [{
-          role: "assistant",
-          content: [{ type: "text", text: externalEdit.responseText }],
-          api: "anthropic-messages",
-          provider: config.llm.provider,
-          model: config.llm.model,
-          usage: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: 0,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-          },
-          stopReason: "stop",
-          timestamp: Date.now(),
-        }], instruction, { sessionKind });
-        await refreshBookSessionFromTranscript();
-        broadcast("agent:complete", { instruction, activeBookId: externalEdit.activeBookId, sessionId: bookSession.sessionId, sessionKind });
-        return c.json({
-          response: externalEdit.responseText,
-          session: {
-            sessionId: bookSession.sessionId,
-            sessionKind,
-            ...(externalEdit.activeBookId ? { activeBookId: externalEdit.activeBookId } : {}),
-          },
-        });
-      }
-
       // Resolve model — multi-service resolution
       let resolvedModel: ResolvedModel["model"] | undefined;
       let resolvedApiKey: string | undefined;
@@ -5147,15 +4878,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             baseUrl: configuredEntry?.baseUrl ?? "",
           } as any)
         : client;
-      // 确认式生产任务的 intent：写下一章的各种触发方式（quick-action 按钮、
-      // free-text 明确写章命令、写作指令启发式）统一归一成 write_next，与其它
-      // button/slash 确认的生产 intent 走同一条任务分支，获得 taskId、
-      // AbortController、磁盘快照与单任务闸门。
-      const confirmedIntent: RequestedIntent | undefined = isWriteNextProductionRequest({ instruction, agentBookId, sessionKind, actionSource, requestedIntent })
-        ? "write_next"
-        : requestedIntent && isConfirmedProductionAction({ actionSource, requestedIntent })
-          ? requestedIntent
-          : undefined;
+      // Only a structured action request can start a production task. Free text
+      // always stays in the Pi agent loop; the host never infers intent from prose.
+      const confirmedIntent = requestedIntent && isConfirmedProductionAction({ actionSource, requestedIntent })
+        ? requestedIntent
+        : undefined;
       // 任务的 execution id 在构建 pipeline 之前生成并传入 executionIdForSSE：
       // 该 pipeline 广播的进度事件（log / llm:progress / context:compression）
       // 由此带上任务 id。同会话并行聊天轮的 pipeline 是另一次请求单独构建的、
