@@ -37,7 +37,12 @@ import {
 } from "../utils/governed-working-set.js";
 import { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "../utils/pov-filter.js";
 import { parseCreativeOutput } from "./writer-parser.js";
-import { buildRuntimeStateArtifacts, type RuntimeStateArtifacts } from "../state/runtime-state-store.js";
+import {
+  buildRuntimeStateArtifacts,
+  buildRuntimeStateArtifactsFromSnapshot,
+  loadRuntimeStateSnapshotAtChapter,
+  type RuntimeStateArtifacts,
+} from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
@@ -93,6 +98,8 @@ export interface SettleChapterStateInput {
   readonly title: string;
   readonly content: string;
   readonly allowReapply?: boolean;
+  readonly allowNewHooks?: boolean;
+  readonly baselineChapter?: number;
   readonly chapterIntent?: string;
   readonly contextPackage?: ContextPackage;
   readonly ruleStack?: RuleStack;
@@ -455,6 +462,9 @@ export class WriterAgent extends BaseAgent {
   }
 
   async settleChapterState(input: SettleChapterStateInput): Promise<WriteChapterOutput> {
+    const baselineStoryDir = input.baselineChapter === undefined
+      ? join(input.bookDir, "story")
+      : join(input.bookDir, "story", "snapshots", String(input.baselineChapter));
     const [
       currentState,
       ledger,
@@ -465,14 +475,17 @@ export class WriterAgent extends BaseAgent {
       characterMatrix,
       volumeOutline,
     ] = await Promise.all([
-      // Phase 5 consolidation fallback: derive initial state when only seed on disk.
-      readCurrentStateWithFallback(input.bookDir, "(文件尚未创建)"),
-      this.readFileOrDefault(join(input.bookDir, "story/particle_ledger.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/pending_hooks.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/chapter_summaries.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/subplot_board.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/emotional_arcs.md")),
-      readCharacterContext(input.bookDir, "(文件尚未创建)"),
+      input.baselineChapter === undefined
+        ? readCurrentStateWithFallback(input.bookDir, "(文件尚未创建)")
+        : this.readFileOrDefault(join(baselineStoryDir, "current_state.md")),
+      this.readFileOrDefault(join(baselineStoryDir, "particle_ledger.md")),
+      this.readFileOrDefault(join(baselineStoryDir, "pending_hooks.md")),
+      this.readFileOrDefault(join(baselineStoryDir, "chapter_summaries.md")),
+      this.readFileOrDefault(join(baselineStoryDir, "subplot_board.md")),
+      this.readFileOrDefault(join(baselineStoryDir, "emotional_arcs.md")),
+      input.baselineChapter === undefined
+        ? readCharacterContext(input.bookDir, "(文件尚未创建)")
+        : this.readSnapshotCharacterContext(input.bookDir, baselineStoryDir),
       readVolumeMap(input.bookDir, "(文件尚未创建)"),
     ]);
 
@@ -518,6 +531,8 @@ export class WriterAgent extends BaseAgent {
       resolvedLanguage,
       input.chapterNumber,
       input.allowReapply,
+      input.baselineChapter,
+      input.allowNewHooks,
     );
 
     return {
@@ -736,6 +751,16 @@ export class WriterAgent extends BaseAgent {
         relativePath: join("story", "chapter_summaries.md"),
         content: runtimeStateArtifacts.chapterSummariesMarkdown,
       });
+    }
+
+    if (output.updatedSubplots) {
+      writes.push({ relativePath: join("story", "subplot_board.md"), content: output.updatedSubplots });
+    }
+    if (output.updatedEmotionalArcs) {
+      writes.push({ relativePath: join("story", "emotional_arcs.md"), content: output.updatedEmotionalArcs });
+    }
+    if (output.updatedCharacterMatrix) {
+      writes.push({ relativePath: join("story", "character_matrix.md"), content: output.updatedCharacterMatrix });
     }
 
     const runtimeStateSnapshot = runtimeStateArtifacts?.snapshot ?? output.runtimeStateSnapshot;
@@ -1150,6 +1175,15 @@ ${overrides}\n`;
     }
   }
 
+  private async readSnapshotCharacterContext(
+    bookDir: string,
+    snapshotStoryDir: string,
+  ): Promise<string> {
+    const snapshotMatrix = await this.readFileOrDefault(join(snapshotStoryDir, "character_matrix.md"));
+    if (snapshotMatrix !== "(文件尚未创建)") return snapshotMatrix;
+    return readCharacterContext(bookDir, "(文件尚未创建)");
+  }
+
   /** Save new truth files (summaries, subplots, emotional arcs, character matrix). */
   async saveNewTruthFiles(
     bookDir: string,
@@ -1261,16 +1295,33 @@ ${overrides}\n`;
     language: "zh" | "en",
     authoritativeChapterNumber?: number,
     allowReapply?: boolean,
+    baselineChapter?: number,
+    allowNewHooks?: boolean,
   ): Promise<RuntimeStateArtifacts | null> {
     if (!delta) return null;
     const safeDelta = authoritativeChapterNumber === undefined
       ? delta
       : this.normalizeRuntimeStateDeltaChapter(delta, authoritativeChapterNumber);
-    return buildRuntimeStateArtifacts({
+    if (baselineChapter === undefined) {
+      return buildRuntimeStateArtifacts({
+        bookDir,
+        delta: safeDelta,
+        language,
+        allowReapply,
+        allowNewHooks,
+      });
+    }
+    const snapshot = await loadRuntimeStateSnapshotAtChapter({
       bookDir,
+      chapterNumber: baselineChapter,
+      language,
+    });
+    return buildRuntimeStateArtifactsFromSnapshot({
+      snapshot,
       delta: safeDelta,
       language,
       allowReapply,
+      allowNewHooks,
     });
   }
 

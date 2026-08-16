@@ -738,10 +738,17 @@ export function isTransientLLMHttpError(error: unknown): boolean {
   return statusHit || phraseHit;
 }
 
+function isIncompleteLLMResponseError(error: unknown): boolean {
+  const text = collectErrorText(error).toLowerCase();
+  return text.includes("llm returned reasoning without a final answer")
+    || text.includes("llm returned empty response");
+}
+
 function isRetryableLLMError(error: unknown): boolean {
   // PartialResponseError = 流在生成中途被掐断（网关切长连接等）。重试会完整
   // 重新生成一次，比把半截内容当成功交付（截断的章节/设定文件）要正确。
   return error instanceof PartialResponseError
+    || isIncompleteLLMResponseError(error)
     || isTransientLLMTransportError(error)
     || isTransientLLMHttpError(error);
 }
@@ -978,7 +985,12 @@ function extractOpenAITextPart(value: any): string {
 
 function extractChatContent(json: any): string {
   const message = json?.choices?.[0]?.message;
-  return extractOpenAITextPart(message?.content) || extractOpenAITextPart(message?.reasoning_content);
+  return extractOpenAITextPart(message?.content);
+}
+
+function extractChatReasoningContent(json: any): string {
+  return extractOpenAITextPart(json?.choices?.[0]?.message?.reasoning_content)
+    || extractOpenAITextPart(json?.choices?.[0]?.message?.reasoning_details);
 }
 
 function extractChatDeltaContent(json: any): string {
@@ -1204,6 +1216,7 @@ async function chatCompletionViaCustomOpenAICompatible(
     let content = "";
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let sawResponseTerminal = false;
+    let sawResponseIncomplete = false;
     const monitor = createStreamMonitor(onStreamProgress);
 
     try {
@@ -1224,6 +1237,7 @@ async function chatCompletionViaCustomOpenAICompatible(
           }
           if (json.type === "response.completed" || json.type === "response.incomplete") {
             sawResponseTerminal = true;
+            if (json.type === "response.incomplete") sawResponseIncomplete = true;
             usage = {
               promptTokens: json.response?.usage?.input_tokens ?? 0,
               completionTokens: json.response?.usage?.output_tokens ?? 0,
@@ -1245,6 +1259,9 @@ async function chatCompletionViaCustomOpenAICompatible(
     if (!sawResponseTerminal) {
       // Responses 协议的正常结束必须有 response.completed/incomplete 终止事件
       throw new PartialResponseError(content, new Error("stream closed without response.completed"));
+    }
+    if (sawResponseIncomplete) {
+      throw new PartialResponseError(content, new Error("response ended before the final answer was complete"));
     }
     return { content, usage };
   }
@@ -1297,7 +1314,17 @@ async function chatCompletionViaCustomOpenAICompatible(
     // MiniMax M2.x 等模型可能把思考内容以 <think>...</think> 内联在 content 开头，
     // 剥掉起始处的完整 think 块，防止思考内容混进章节/对话正文（issue #329）。
     const content = stripLeadingThinkBlock(extractChatContent(json));
+    const finishReason = json?.choices?.[0]?.finish_reason;
+    if (finishReason === "length" || finishReason === "max_tokens") {
+      throw new PartialResponseError(
+        content || extractChatReasoningContent(json),
+        new Error(`model reached the output limit (${finishReason})`),
+      );
+    }
     if (!content) {
+      if (extractChatReasoningContent(json)) {
+        throw wrapLLMError(new Error("LLM returned reasoning without a final answer"), errorCtx);
+      }
       throw wrapLLMError(new Error("LLM returned empty response"), errorCtx);
     }
     return {
@@ -1320,6 +1347,7 @@ async function chatCompletionViaCustomOpenAICompatible(
   // OpenAI 协议的正常结束必须出现 [DONE] 哨兵或带 finish_reason 的 chunk。
   // 网关掐断长连接时流会"干净地"关闭但没有任何终止信号——那是截断，不是完成。
   let sawTerminal = false;
+  let terminalFinishReason: string | undefined;
   const monitor = createStreamMonitor(onStreamProgress);
   // 内联 <think>...</think> 的模型（如 MiniMax M2.x）：剥掉响应起始处的完整
   // think 块，思考内容既不并入正文也不通过 onTextDelta 发给 UI（issue #329）。
@@ -1342,6 +1370,7 @@ async function chatCompletionViaCustomOpenAICompatible(
         const json = JSON.parse(event.data);
         if (json?.choices?.[0]?.finish_reason) {
           sawTerminal = true;
+          terminalFinishReason = String(json.choices[0].finish_reason);
         }
         const delta = extractChatDeltaContent(json);
         if (delta) {
@@ -1373,14 +1402,22 @@ async function chatCompletionViaCustomOpenAICompatible(
 
   // 流结束仍缓冲在剥离器里的文本（未闭合的 think 块等）原样并回，避免数据丢失。
   content += thinkStripper.flush();
-  const finalContent = content || reasoningContent;
-  if (!finalContent) {
+  if (terminalFinishReason === "length" || terminalFinishReason === "max_tokens") {
+    throw new PartialResponseError(
+      content || reasoningContent,
+      new Error(`model reached the output limit (${terminalFinishReason})`),
+    );
+  }
+  if (!content) {
+    if (reasoningContent) {
+      throw wrapLLMError(new Error("LLM returned reasoning without a final answer"), errorCtx);
+    }
     throw wrapLLMError(new Error("LLM returned empty response from stream"), errorCtx);
   }
   if (!sawTerminal) {
-    throw new PartialResponseError(finalContent, new Error("stream closed without [DONE]/finish_reason"));
+    throw new PartialResponseError(content, new Error("stream closed without [DONE]/finish_reason"));
   }
-  return { content: finalContent, usage };
+  return { content, usage };
 }
 
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
@@ -1564,6 +1601,9 @@ async function chatCompletionViaPiAi(
       .filter((block): block is { type: "text"; text: string } => block.type === "text")
       .map((block) => block.text)
       .join("");
+    if (response.stopReason === "length") {
+      throw new PartialResponseError(content, new Error("model reached the output limit (length)"));
+    }
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
       console.warn(`[inkos] LLM 非流式响应无文本内容 (${diag})`);
@@ -1585,6 +1625,7 @@ async function chatCompletionViaPiAi(
   let inputTokens = 0;
   let outputTokens = 0;
   let sawDone = false;
+  let stoppedAtOutputLimit = false;
 
   try {
     const iterator = eventStream[Symbol.asyncIterator]();
@@ -1606,6 +1647,7 @@ async function chatCompletionViaPiAi(
         outputTokens = msg.usage.output;
         if (event.type === "done") {
           sawDone = true;
+          stoppedAtOutputLimit = msg.stopReason === "length";
         }
         if (event.type === "error" && msg.errorMessage) {
           const partial = chunks.join("");
@@ -1630,6 +1672,9 @@ async function chatCompletionViaPiAi(
   }
 
   const content = chunks.join("");
+  if (stoppedAtOutputLimit) {
+    throw new PartialResponseError(content, new Error("model reached the output limit (length)"));
+  }
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;
     console.warn(`[inkos] LLM 流式响应无文本内容 (${diag})`);

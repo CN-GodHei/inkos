@@ -588,7 +588,7 @@ describe("chatCompletion via pi-ai", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses reasoning_content for custom openai-compatible non-stream responses that omit content", async () => {
+  it("rejects reasoning-only custom non-stream responses instead of treating thinking as final text", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -607,15 +607,14 @@ describe("chatCompletion via pi-ai", () => {
         baseUrl: "https://gateway.example/v1",
       },
     });
-    const result = await chatCompletion(client, "glm-compat", [{ role: "user", content: "nihao" }]);
-
-    expect(result.content).toBe("推理通道文本");
+    await expect(chatCompletion(client, "glm-compat", [{ role: "user", content: "nihao" }], { retry: false }))
+      .rejects.toThrow(/final answer|empty response/i);
     expect(fetchMock).toHaveBeenCalledOnce();
 
     vi.unstubAllGlobals();
   });
 
-  it("uses reasoning_content for custom openai-compatible streams that omit content deltas", async () => {
+  it("rejects reasoning-only custom streams instead of persisting thinking as final text", async () => {
     const encoder = new TextEncoder();
     const sse = [
       "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"你\"}}]}\n\n",
@@ -643,12 +642,44 @@ describe("chatCompletion via pi-ai", () => {
         baseUrl: "https://gateway.example/v1",
       },
     });
-    const result = await chatCompletion(client, "glm-compat", [{ role: "user", content: "nihao" }]);
-
-    expect(result.content).toBe("你好");
-    expect(result.usage.totalTokens).toBe(5);
+    await expect(chatCompletion(client, "glm-compat", [{ role: "user", content: "nihao" }], { retry: false }))
+      .rejects.toThrow(/final answer|empty response/i);
     expect(fetchMock).toHaveBeenCalledOnce();
 
+    vi.unstubAllGlobals();
+  });
+
+  it("retries a reasoning-only non-stream response inside the same model stage", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { reasoning_content: "先分析但没有最终答案" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "完整最终答案" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = makeClient(0.7, {
+      service: "custom",
+      stream: false,
+      _piModel: {
+        ...MOCK_PI_MODEL,
+        provider: "openai",
+        baseUrl: "https://gateway.example/v1",
+      },
+    });
+    const result = await chatCompletion(client, "glm-compat", [{ role: "user", content: "nihao" }]);
+
+    expect(result.content).toBe("完整最终答案");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });
 
@@ -1201,6 +1232,21 @@ describe("stream interruption detection", () => {
     vi.unstubAllGlobals();
   });
 
+  it("rejects a native chat stream that reaches the output limit", async () => {
+    const sse = [
+      "data: {\"choices\":[{\"delta\":{\"content\":\"写到上限的正文\"}}]}\n\n",
+      "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const fetchMock = vi.fn().mockImplementation(async () => sseResponse(sse));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(chatCompletion(nativeStreamClient(), "glm-compat", [{ role: "user", content: "写正文" }]))
+      .rejects.toThrow(/output limit|length|Stream interrupted/i);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    vi.unstubAllGlobals();
+  });
+
   it("retries a pi-ai stream that errors after a long partial instead of silently keeping the truncation", async () => {
     const longPartial = "长".repeat(600);
     const partialMsg = makeAssistantMessage(longPartial);
@@ -1241,5 +1287,18 @@ describe("stream interruption detection", () => {
 
     expect(result.content).toBe("第二次完整");
     expect(mockStreamSimple).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a pi-ai done message whose stop reason is length", async () => {
+    const partial = makeAssistantMessage("只写到一半");
+    const lengthMessage = { ...partial, stopReason: "length" } as AssistantMessage;
+    mockStreamSimple.mockImplementation(() => makeEventStream([
+      { type: "text_delta", contentIndex: 0, delta: "只写到一半", partial },
+      { type: "done", reason: "length", message: lengthMessage },
+    ]) as never);
+
+    await expect(chatCompletion(makeClient(), "test-model", [{ role: "user", content: "写" }]))
+      .rejects.toThrow(/output limit|length|Stream interrupted/i);
+    expect(mockStreamSimple).toHaveBeenCalledTimes(3);
   });
 });

@@ -187,6 +187,46 @@ describe("PlayRunner", () => {
       .resolves.toContain("屏幕弹出新城花园 187 次");
   });
 
+  it("does not commit state when scene rendering fails", async () => {
+    const db = new FakePlayDB();
+    const runner = new PlayRunner({
+      projectRoot: root,
+      worldId: "render-failure",
+      runId: "main",
+      db,
+      agents: {
+        actionInterpreter: {
+          interpret: vi.fn(async () => ({ actionKind: "look" as const, intent: "检查封条" })),
+        },
+        worldMutator: {
+          proposeMutation: vi.fn(async () => ({
+            eventId: "evt-1",
+            turn: 1,
+            actionKind: "look" as const,
+            summary: "玩家发现封条有新划痕。",
+            entities: {
+              upsert: [{ id: "evidence_seal", type: "evidence" as const, label: "封条划痕" }],
+            },
+          })),
+        },
+        sceneRenderer: {
+          render: vi.fn(async () => {
+            throw new Error("Model did not submit_play_scene");
+          }),
+        },
+      },
+    });
+
+    await expect(runner.step("检查封条")).rejects.toThrow("submit_play_scene");
+
+    expect(db.events).toHaveLength(0);
+    expect(db.entities.has("evidence_seal")).toBe(false);
+    const runDir = join(root, "worlds", "render-failure", "runs", "main");
+    await expect(readFile(join(runDir, "events.jsonl"), "utf-8")).rejects.toThrow();
+    await expect(readFile(join(runDir, "projections", "scene.md"), "utf-8")).rejects.toThrow();
+    await expect(readFile(join(runDir, "transcript.jsonl"), "utf-8")).rejects.toThrow();
+  });
+
   it("seeds opening graph state without consuming the first player turn", async () => {
     const db = new FakePlayDB();
     const store = new PlayStore(root);
@@ -250,6 +290,72 @@ describe("PlayRunner", () => {
     await expect(readFile(join(root, "worlds", "opening-seed", "runs", "main", "projections", "state.md"), "utf-8"))
       .resolves
       .toContain("无名婴儿照片");
+  });
+
+  it("reconciles opening prose into the graph when the opening mutator returns no facts", async () => {
+    const db = new FakePlayDB();
+    const store = new PlayStore(root);
+    await store.createWorld({
+      id: "opening-reconcile",
+      title: "零点十七分的隧道",
+      premise: "玩家是公交司机，对车上十名乘客负责。一个哮喘儿童由母亲抱着，老人要回去拿胰岛素。",
+      language: "zh",
+    });
+    await store.ensureRun("opening-reconcile", "main");
+
+    const reconcile = vi.fn(async () => ({
+      eventId: "evt-0",
+      turn: 0,
+      actionKind: "look" as const,
+      summary: "补记开场已经出现的司机、母亲、孩子和老人。",
+      entities: {
+        upsert: [
+          { id: "actor_player", type: "actor" as const, label: "公交司机", summary: "对十名乘客负责。", updatedEventId: "evt-0" },
+          { id: "actor_mother", type: "actor" as const, label: "母亲", summary: "抱着哮喘儿童。", updatedEventId: "evt-0" },
+          { id: "actor_child", type: "actor" as const, label: "哮喘儿童", summary: "缺的是他的哮喘药。", updatedEventId: "evt-0" },
+          { id: "actor_elder", type: "actor" as const, label: "老人", summary: "需要取回自己的胰岛素。", updatedEventId: "evt-0" },
+        ],
+      },
+      edges: {
+        upsert: [{
+          id: "edge_actor_mother_照顾_actor_child",
+          fromId: "actor_mother",
+          type: "照顾",
+          toId: "actor_child",
+          value: { role: "relation" },
+          validFromEventId: "evt-0",
+          sourceEventId: "evt-0",
+        }],
+      },
+    }));
+    const runner = new PlayRunner({
+      projectRoot: root,
+      worldId: "opening-reconcile",
+      runId: "main",
+      store,
+      db,
+      agents: {
+        actionInterpreter: { interpret: vi.fn(async () => ({ actionKind: "look", intent: "开场播种" })) },
+        worldMutator: {
+          proposeMutation: vi.fn(async () => ({ eventId: "evt-0", turn: 0, actionKind: "look" })),
+        },
+        sceneRenderer: { render: vi.fn(async () => ({ sceneText: "不会被调用", suggestedActions: [] })) },
+        sceneReconciler: { reconcile },
+      },
+    });
+
+    const sceneText = "你是司机。第三排的哮喘儿童被母亲抱着，老人说胰岛素落在行李舱。";
+    const result = await runner.seedOpening({ sceneText, suggestedActions: [] });
+
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
+      turn: 0,
+      sceneText,
+      context: expect.stringContaining("十名乘客"),
+    }));
+    expect(result?.mutation.entities.upsert).toHaveLength(4);
+    expect(db.entities.get("actor_child")?.summary).toContain("他的哮喘药");
+    expect([...db.edges.values()].some((edge) => edge.fromId === "actor_mother" && edge.toId === "actor_child")).toBe(true);
+    expect(db.events).toHaveLength(0);
   });
 
   it("tells the opening seeder to turn already-held objects into holding edges", async () => {
@@ -433,6 +539,7 @@ describe("PlayRunner", () => {
     expect(mutatorContext).toContain("org_tieshou_escort [organization]: 铁手镖队");
     expect(renderSpy).toHaveBeenCalledWith(expect.objectContaining({
       worldPremise: expect.stringContaining("世界契约"),
+      context: expect.stringContaining("actor_laochen [actor]: 老陈"),
     }));
   });
 

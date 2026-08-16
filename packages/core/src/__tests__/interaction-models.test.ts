@@ -10,6 +10,10 @@ import {
   PlayModeSchema,
   RequestedIntentSchema,
   InteractiveFilmCreateActionPayloadSchema,
+  FanficCreateActionPayloadSchema,
+  ContinuationImportActionPayloadSchema,
+  SpinoffCreateActionPayloadSchema,
+  ImitationCreateActionPayloadSchema,
   ScriptCreateActionPayloadSchema,
   ScriptTargetFormatSchema,
   SessionKindSchema,
@@ -111,6 +115,40 @@ describe("interaction models", () => {
       title: "盛世账页",
       budget: "5000元",
     });
+  });
+
+  it("validates derivative-work payloads without magic routes", () => {
+    expect(FanficCreateActionPayloadSchema.parse({
+      title: "霜港来信",
+      sourcePath: ".inkos/uploads/canon.pdf",
+      mode: "canon",
+    })).toMatchObject({ title: "霜港来信", mode: "canon" });
+    expect(FanficCreateActionPayloadSchema.safeParse({ title: "缺少正典" }).success).toBe(false);
+
+    expect(ContinuationImportActionPayloadSchema.parse({
+      title: "雾港续章",
+      sourcePath: ".inkos/uploads/novel.txt",
+    })).toMatchObject({ title: "雾港续章" });
+    expect(ContinuationImportActionPayloadSchema.safeParse({
+      sourcePath: "novel.txt",
+      targetRoute: "import:continuation",
+    }).success).toBe(false);
+
+    expect(SpinoffCreateActionPayloadSchema.parse({
+      title: "雨夜番外",
+      parentBookId: "harbor",
+      direction: "老船工视角",
+    })).toMatchObject({ parentBookId: "harbor" });
+
+    expect(ImitationCreateActionPayloadSchema.parse({
+      title: "纸灯新案",
+      referenceText: "参考文风片段",
+      storyIdea: "原创县城悬疑",
+    })).toMatchObject({ storyIdea: "原创县城悬疑" });
+    expect(ImitationCreateActionPayloadSchema.safeParse({
+      title: "缺少参考",
+      storyIdea: "原创故事",
+    }).success).toBe(false);
   });
 
   it("recognizes terminal execution statuses", () => {

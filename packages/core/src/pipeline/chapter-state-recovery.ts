@@ -18,6 +18,8 @@ export interface SettlementRetryParams {
   readonly book: BookConfig;
   readonly bookDir: string;
   readonly chapterNumber: number;
+  readonly baselineChapter?: number;
+  readonly allowNewHooks?: boolean;
   readonly title: string;
   readonly content: string;
   readonly reducedControlInput?: {
@@ -59,6 +61,8 @@ export async function retrySettlementAfterValidationFailure(
     title: params.title,
     content: params.content,
     allowReapply: true,
+    baselineChapter: params.baselineChapter,
+    allowNewHooks: params.allowNewHooks,
     chapterIntent: params.reducedControlInput?.chapterIntent,
     contextPackage: params.reducedControlInput?.contextPackage,
     ruleStack: params.reducedControlInput?.ruleStack,

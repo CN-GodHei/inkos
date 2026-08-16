@@ -11,6 +11,7 @@ import {
   createShortFictionRunTool,
   createPatchChapterTextTool,
   createReplaceChapterTextTool,
+  createResyncChapterStateTool,
   createDeleteLatestChapterTool,
   createPlayEditTool,
   createPlayStartTool,
@@ -253,6 +254,45 @@ describe("agent deterministic writing tools", () => {
     ]);
   });
 
+  it("resyncs derived chapter state and returns the fresh audit result without rewriting prose", async () => {
+    const pipeline = contextPipeline({
+      resyncChapterStateAndAudit: vi.fn(async () => ({
+        chapter: {
+          chapterNumber: 3,
+          title: "风暴",
+          wordCount: 120,
+          status: "ready-for-review",
+        },
+        audit: {
+          chapterNumber: 3,
+          passed: false,
+          summary: "one continuity issue remains",
+          issues: [{
+            severity: "warning" as const,
+            category: "continuity",
+            description: "The recovered hook is not yet reflected in the final paragraph.",
+            suggestion: "Align the final paragraph with the persisted hook.",
+          }],
+        },
+      })),
+    });
+    const tool = createResyncChapterStateTool(pipeline as never, "harbor", { language: "en" });
+
+    const result = await tool.execute("resync-3", { chapterNumber: 3, allowNewHooks: false });
+
+    expect(pipeline.resyncChapterStateAndAudit).toHaveBeenCalledWith("harbor", 3, { allowNewHooks: false });
+    expect(result.details).toMatchObject({
+      kind: "chapter_state_resynced",
+      chapterNumber: 3,
+      auditPassed: false,
+      status: "audit-failed",
+    });
+    expect(result.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("recovered hook"),
+    });
+  });
+
   it("requires an explicit title when the architect sub-agent creates a book", async () => {
     const pipeline = {
       initBook: vi.fn(async () => undefined),
@@ -294,7 +334,8 @@ describe("agent deterministic writing tools", () => {
     expect(en.content[0]?.type).toBe("text");
     if (zh.content[0]?.type === "text") {
       expect(zh.content[0].text).toContain("创建长篇书籍");
-      expect(zh.content[0].text).toContain("确认后会切换到对应入口");
+      expect(zh.content[0].text).toContain("确认后将直接执行");
+      expect(zh.content[0].text).toContain("不会要求你再去另一个表单重复填写");
     }
     if (en.content[0]?.type === "text") {
       expect(en.content[0].text).toContain("Generate cover");
@@ -308,6 +349,7 @@ describe("agent deterministic writing tools", () => {
     const result = await tool.execute("proposal-same-session", {
       action: "short_run",
       instruction: "写一篇婚姻反杀短篇",
+      shortRun: { title: "离婚协议", direction: "婚姻反杀短篇" },
     });
 
     expect(result.details).toMatchObject({
@@ -327,6 +369,7 @@ describe("agent deterministic writing tools", () => {
     const result = await tool.execute("proposal-with-skill", {
       action: "short_run",
       instruction: "把这份素材蒸馏成一篇商业短篇",
+      shortRun: { title: "旧账新生", direction: "把已提供素材蒸馏成商业短篇" },
     });
 
     expect(result.details).toMatchObject({
@@ -334,6 +377,16 @@ describe("agent deterministic writing tools", () => {
       action: "short_run",
       requestedSkills: ["writer-distillation"],
     });
+  });
+
+  it("requires a host-owned title and direction before proposing short production", async () => {
+    const tool = createProposeActionTool("zh");
+
+    await expect(tool.execute("proposal-missing-short-title", {
+      action: "short_run",
+      instruction: "写一篇婚姻反杀短篇",
+      shortRun: { direction: "婚姻反杀短篇" } as any,
+    })).rejects.toThrow(/shortRun\.title/);
   });
 
   it("carries structured execution payloads in proposed actions", async () => {
@@ -510,6 +563,22 @@ describe("agent deterministic writing tools", () => {
     });
   });
 
+  it("declares executable proposal fields as required in the model-facing schema", () => {
+    const tool = createProposeActionTool("zh");
+    const schema = tool.parameters as {
+      properties?: Record<string, { required?: string[] }>;
+    };
+
+    expect(schema.properties?.interactiveFilmCreate?.required).toContain("title");
+    expect(schema.properties?.shortRun?.required).toEqual(expect.arrayContaining(["title", "direction"]));
+    expect(schema.properties?.playStart?.required).toEqual(expect.arrayContaining(["title", "premise", "initialScene"]));
+    expect(schema.properties?.translationCreate?.required).toEqual(expect.arrayContaining([
+      "filePath",
+      "sourceLanguage",
+      "targetLanguage",
+    ]));
+  });
+
   it("drops non-positive placeholder counts from interactive-film confirmation payloads", async () => {
     const tool = createProposeActionTool("zh");
 
@@ -551,9 +620,21 @@ describe("agent deterministic writing tools", () => {
           suggestedActions: ["检查演出表"],
         },
       },
-      runnerFactory: () => ({
+      runnerFactory: ({ db }) => ({
         async seedOpening(input) {
           seededScene = input.sceneText;
+          db.upsertEntity({
+            id: "actor_player",
+            type: "actor",
+            label: "玩家",
+            summary: "当前玩家。",
+          });
+          db.upsertEntity({
+            id: "location_theater",
+            type: "location",
+            label: "旧戏院",
+            summary: "开场地点。",
+          });
           return null;
         },
       }),
@@ -597,33 +678,123 @@ describe("agent deterministic writing tools", () => {
     })).rejects.toThrow("playStart.title");
   });
 
-  it("can propose opening existing assisted creation workflows without claiming production", async () => {
+  it("proposes derivative production with structured payloads and no form route", async () => {
     const tool = createProposeActionTool("zh");
 
     const cases = [
-      { action: "fanfic_init", route: "import:fanfic", title: "打开同人创作" },
-      { action: "spinoff_create", route: "import:spinoff", title: "打开番外创作" },
-      { action: "style_imitation", route: "import:imitation", title: "打开仿写/文风分析" },
+      {
+        action: "fanfic_init",
+        payload: { fanficCreate: { title: "霜港来信", sourceText: "原作正典片段", sourceName: "霜港" } },
+        title: "创建同人作品",
+      },
+      {
+        action: "continuation_import",
+        payload: { continuationImport: { title: "雾港续章", sourcePath: ".inkos/uploads/novel.txt" } },
+        title: "导入并续写作品",
+      },
+      {
+        action: "spinoff_create",
+        payload: { spinoffCreate: { title: "雨夜番外", parentBookId: "harbor", direction: "老船工视角" } },
+        title: "创建番外作品",
+      },
+      {
+        action: "style_imitation",
+        payload: { imitationCreate: { title: "纸灯新案", referenceText: "参考文风片段", storyIdea: "原创县城悬疑" } },
+        title: "创建仿写作品",
+      },
     ] as const;
 
     for (const item of cases) {
       const result = await tool.execute(`proposal-${item.action}`, {
         action: item.action,
-        instruction: "打开对应 Studio 工具，等待用户补充材料。",
+        instruction: "确认后直接创建对应作品。",
+        ...item.payload,
       });
 
       expect(result.content[0]?.type).toBe("text");
       if (result.content[0]?.type === "text") {
         expect(result.content[0].text).toContain(item.title);
-        expect(result.content[0].text).toContain("不会直接生成成品");
+        expect(result.content[0].text).toContain("确认后将直接执行");
       }
       expect(result.details).toMatchObject({
         kind: "proposed_action",
         action: item.action,
         targetSessionKind: "chat",
-        targetRoute: item.route,
+        actionPayload: item.payload,
       });
+      expect(result.details).not.toHaveProperty("targetRoute");
     }
+  });
+
+  it("uses the single host-provided attachment as the derivative source when the model omits its path", async () => {
+    const attachmentPath = ".inkos/uploads/session/style-source.md";
+    const tool = createProposeActionTool("zh", {
+      attachmentPaths: () => [attachmentPath],
+    });
+
+    const result = await tool.execute("proposal-imitation-attachment", {
+      action: "style_imitation",
+      instruction: "参考附件文风创作一个全新故事。",
+      imitationCreate: {
+        title: "借来的三分钟",
+        storyIdea: "港口夜班修表师发现全镇的钟每天借走三分钟。",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      kind: "proposed_action",
+      action: "style_imitation",
+      actionPayload: {
+        imitationCreate: {
+          title: "借来的三分钟",
+          storyIdea: "港口夜班修表师发现全镇的钟每天借走三分钟。",
+          referencePath: attachmentPath,
+        },
+      },
+    });
+  });
+
+  it("replaces a truncated uploaded-file path with the single host-provided attachment", async () => {
+    const attachmentPath = ".inkos/uploads/session/style-source.md";
+    const tool = createProposeActionTool("zh", {
+      attachmentPaths: () => [attachmentPath],
+    });
+
+    const result = await tool.execute("proposal-imitation-truncated-attachment", {
+      action: "style_imitation",
+      instruction: "参考附件文风创作一个全新故事。",
+      imitationCreate: {
+        title: "借来的三分钟",
+        storyIdea: "港口夜班修表师发现全镇的钟每天借走三分钟。",
+        referencePath: ".inkos/uploads/1786846...",
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      actionPayload: {
+        imitationCreate: {
+          referencePath: attachmentPath,
+        },
+      },
+    });
+  });
+
+  it("does not guess among multiple attachment paths", async () => {
+    const tool = createProposeActionTool("zh", {
+      attachmentPaths: () => [
+        ".inkos/uploads/session/one.md",
+        ".inkos/uploads/session/two.md",
+      ],
+    });
+
+    await expect(tool.execute("proposal-imitation-ambiguous-attachments", {
+      action: "style_imitation",
+      instruction: "参考附件文风创作一个全新故事。",
+      imitationCreate: {
+        title: "借来的三分钟",
+        storyIdea: "港口夜班修表师发现全镇的钟每天借走三分钟。",
+      },
+    })).rejects.toThrow(/referenceText or referencePath/);
   });
 
   it("passes the explicit architect title straight into initBook", async () => {
@@ -1243,6 +1414,29 @@ describe("agent deterministic writing tools", () => {
     if (result.content[0]?.type === "text") {
       expect(result.content[0].text).toBe(longContent);
       expect(result.content[0].text).not.toContain("[truncated");
+    }
+  });
+
+  it("reads project-local production sources without escaping the project root", async () => {
+    const filmDir = join(root, "interactive-films", "storm-eye");
+    await mkdir(filmDir, { recursive: true });
+    await writeFile(join(filmDir, "script.md"), "# Storm Eye\n\nAuthoritative source.", "utf-8");
+    const tool = createReadTool(root, { scope: "project" });
+
+    const result = await tool.execute("tool-read-project", {
+      path: "interactive-films/storm-eye/script.md",
+    });
+    expect(result.content[0]).toEqual({
+      type: "text",
+      text: "# Storm Eye\n\nAuthoritative source.",
+    });
+
+    const escaped = await tool.execute("tool-read-project-escape", {
+      path: "../outside.md",
+    });
+    expect(escaped.content[0]?.type).toBe("text");
+    if (escaped.content[0]?.type === "text") {
+      expect(escaped.content[0].text).toContain("Path traversal blocked");
     }
   });
 

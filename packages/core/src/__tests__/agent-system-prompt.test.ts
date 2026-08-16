@@ -53,32 +53,27 @@ describe("buildAgentSystemPrompt", () => {
       expect(enPrompt).toContain("Do not make the next session infer missing context");
     });
 
-    it("distinguishes production actions from assisted Studio workflow actions", () => {
+    it("treats derivative works as confirmed production actions instead of assisted routes", () => {
       const prompt = buildAgentSystemPrompt(null, "zh", "chat");
       expect(prompt).toContain("生产型动作");
-      expect(prompt).toContain("辅助入口动作");
       expect(prompt).toContain("fanfic_init");
       expect(prompt).toContain("continuation_import");
       expect(prompt).toContain("spinoff_create");
       expect(prompt).toContain("style_imitation");
-      expect(prompt).toContain("不能声称已经生成成品");
+      expect(prompt).toContain("确认后直接执行");
+      expect(prompt).toContain("不要求用户再到另一个表单重复填写");
+      expect(prompt).not.toContain("辅助入口");
     });
 
-    it("maps style analysis requests to the style-imitation workflow", () => {
+    it("keeps pure style analysis conversational and maps actual imitation to production", () => {
       const zhPrompt = buildAgentSystemPrompt(null, "zh", "chat");
       const enPrompt = buildAgentSystemPrompt(null, "en", "chat");
-      expect(zhPrompt).toContain("文风分析");
-      expect(zhPrompt).toContain("先分析再仿写");
-      expect(zhPrompt).toContain("必须调用 propose_action");
-      expect(zhPrompt).toContain("仿写/文风分析/参考文风/模仿笔法=style_imitation");
-      expect(zhPrompt).toContain("不要用普通文字追问书名、原文、父书路径或解释流程");
-      expect(zhPrompt).toContain("番外/正典资料/不进入主线=spinoff_create");
-      expect(enPrompt).toContain("style analysis");
-      expect(enPrompt).toContain("analyze first then imitate");
-      expect(enPrompt).toContain("you must call propose_action");
-      expect(enPrompt).toContain("style imitation/style analysis/reference-style/prose mimicry=style_imitation");
-      expect(enPrompt).toContain("Do not answer by asking for a title/source text/parent-book path");
-      expect(enPrompt).toContain("side-story/spinoff/canon-materials=spinoff_create");
+      expect(zhPrompt).toContain("纯粹询问或分析文风时直接回答");
+      expect(zhPrompt).toContain("参考文风创作全新故事=style_imitation");
+      expect(zhPrompt).toContain("创建同人/续写/番外/仿写作品时调用 propose_action");
+      expect(enPrompt).toContain("Answer pure style-analysis questions directly");
+      expect(enPrompt).toContain("an original story that learns prose style from a reference=style_imitation");
+      expect(enPrompt).toContain("create fanfiction / continuation / side-story / style-imitation work");
     });
 
     it("adds forced skill guidance without granting execution authority", () => {
@@ -222,6 +217,7 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("short_run");
       expect(prompt).toContain("generate_cover");
       expect(prompt).toContain("让用户确认");
+      expect(prompt).toContain("shortRun：title、direction");
       expect(prompt).not.toContain("short_fiction_run");
       expect(prompt).not.toContain("sub_agent");
       expect(prompt).not.toContain("architect");
@@ -282,6 +278,8 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("propose_action");
       expect(prompt).toContain("script_create");
       expect(prompt).toContain("scriptCreate");
+      expect(prompt).toContain("先用 read 读取");
+      expect(prompt).toContain("不要要求用户重复上传或粘贴");
       expect(prompt).toContain("不要在聊天里直接写完整剧本");
       expect(prompt).toContain("不要凭空改写、压缩或替用户补素材");
       expect(prompt).not.toContain("script_create：");
@@ -310,6 +308,7 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("propose_action");
       expect(prompt).toContain("storyboard_create");
       expect(prompt).toContain("storyboardCreate");
+      expect(prompt).toContain("先用 read 读取");
       expect(prompt).toContain("不要在聊天里直接写完整分镜");
       expect(prompt).toContain("不要凭空改写、压缩或替用户补素材");
       expect(prompt).not.toContain("script_create：");
@@ -338,6 +337,7 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("propose_action");
       expect(prompt).toContain("interactive_film_create");
       expect(prompt).toContain("interactiveFilmCreate");
+      expect(prompt).toContain("先用 read 读取");
       expect(prompt).toContain("变量/旗标");
       expect(prompt).toContain("多结局");
       expect(prompt).toContain("不要在聊天里直接写完整交付稿");
@@ -448,6 +448,8 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("续写新的下一章用 writer");
       expect(prompt).toContain("修改、重写或重修已有章节用 reviser");
       expect(prompt).toContain("三者不可互换");
+      expect(prompt).toContain("只重建状态/摘要/伏笔或重新审稿时，用 resync_chapter_state");
+      expect(prompt).toContain("allowNewHooks=false");
     });
 
     it("forbids answering chapter-writing requests with raw chapter prose in chat", () => {
@@ -482,6 +484,35 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).not.toContain("generate_cover");
       expect(prompt).not.toContain("short_fiction_run");
       expect(prompt).not.toContain("play_start");
+    });
+  });
+
+  describe("interactive-film authoring mode", () => {
+    it("uses the graph-aware authoring harness instead of generic chat", () => {
+      const prompt = buildAgentSystemPrompt("storm-radio", "zh", "interactive-film-authoring");
+
+      expect(prompt).toContain("互动影游创作向导");
+      expect(prompt).toContain("storm-radio");
+      expect(prompt).toContain("完整剧情图谱");
+      expect(prompt).toContain("真实 node id");
+      expect(prompt).toContain("revise_node");
+      expect(prompt).toContain("generate_node_image");
+      expect(prompt).toContain("讨论、比较方案或询问时直接回答，不调用工具");
+      expect(prompt).toContain("完成态只来自成功工具结果");
+      expect(prompt).not.toContain("普通聊天助手");
+      expect(prompt).not.toContain("create_book");
+      expect(prompt).not.toContain("play_start");
+    });
+
+    it("provides the same execution boundary in English", () => {
+      const prompt = buildAgentSystemPrompt("storm-radio", "en", "interactive-film-authoring");
+
+      expect(prompt).toContain("interactive-film authoring guide");
+      expect(prompt).toContain("sole authority for node ids");
+      expect(prompt).toContain("revise_node");
+      expect(prompt).toContain("generate_node_image");
+      expect(prompt).toContain("Answer discussion and comparison requests directly without tools");
+      expect(prompt).not.toContain("general chat assistant");
     });
   });
 

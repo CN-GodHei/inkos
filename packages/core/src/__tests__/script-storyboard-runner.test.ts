@@ -11,9 +11,14 @@ import type { AgentContext } from "../agents/base.js";
 import { loadStoryGraph } from "../interactive-film/graph-store.js";
 
 const chatCompletionMock = vi.hoisted(() => vi.fn());
+const generateStoryGraphMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../llm/provider.js", () => ({
   chatCompletion: chatCompletionMock,
+}));
+
+vi.mock("../interactive-film/generate.js", () => ({
+  generateStoryGraph: generateStoryGraphMock,
 }));
 
 describe("storyboard creation runner", () => {
@@ -22,6 +27,56 @@ describe("storyboard creation runner", () => {
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "inkos-storyboard-assets-"));
     chatCompletionMock.mockReset();
+    generateStoryGraphMock.mockReset();
+    generateStoryGraphMock.mockImplementation((
+      _client: unknown,
+      _model: string,
+      input: { projectId: string; title: string },
+      options?: { language?: "zh" | "en" },
+    ) => {
+      const en = options?.language === "en";
+      return Promise.resolve({
+        schemaVersion: 1,
+        projectId: input.projectId,
+        title: input.title,
+        variables: [],
+        nodes: [
+          {
+            id: "start",
+            title: en ? "Opening" : "开场",
+            type: "start",
+            sceneDesc: en ? "The choice begins." : "抉择开始。",
+            dialogue: [],
+            choices: [{ id: "c1", text: en ? "Proceed" : "继续", targetNodeId: "branch-1", effects: [] }],
+          },
+          {
+            id: "branch-1",
+            title: en ? "First Choice" : "第一次选择",
+            type: "branch",
+            sceneDesc: en ? "Evidence surfaces." : "证据出现。",
+            dialogue: [],
+            choices: [
+              { id: "c2", text: en ? "Reveal" : "公开", targetNodeId: "branch-2", effects: [] },
+              { id: "c3", text: en ? "Hide" : "隐瞒", targetNodeId: "ending-secret", effects: [] },
+            ],
+          },
+          {
+            id: "branch-2",
+            title: en ? "Final Choice" : "最终选择",
+            type: "branch",
+            sceneDesc: en ? "The truth demands a cost." : "真相要求代价。",
+            dialogue: [],
+            choices: [{ id: "c4", text: en ? "Publish" : "公布", targetNodeId: "ending-good", effects: [] }],
+          },
+          { id: "ending-good", title: en ? "Truth" : "真相", type: "ending", sceneDesc: "", dialogue: [], choices: [] },
+          { id: "ending-secret", title: en ? "Silence" : "沉默", type: "ending", sceneDesc: "", dialogue: [], choices: [] },
+        ],
+        endings: [
+          { id: "good", nodeId: "ending-good", title: en ? "Truth" : "真相", type: "good", description: "" },
+          { id: "secret", nodeId: "ending-secret", title: en ? "Silence" : "沉默", type: "secret", description: "" },
+        ],
+      });
+    });
     chatCompletionMock.mockResolvedValue({
       content: [
         "# 冷库账页 分镜",
@@ -95,6 +150,116 @@ describe("storyboard creation runner", () => {
     expect(messages[0]?.content).toContain("inkos-storyboard");
     expect(messages[0]?.content).toContain("Translate narrative beats into visible shots.");
     expect(messages[0]?.content).not.toContain("inkos-long-writing");
+  });
+
+  it("generates large episodic storyboards in complete structural segments", async () => {
+    chatCompletionMock.mockReset();
+    for (const episode of [1, 2, 3]) {
+      chatCompletionMock.mockResolvedValueOnce({
+        content: [
+          `# 风眼来电 第${episode}集分镜`,
+          "",
+          "## 分镜表",
+          `镜头 ${episode}：第${episode}集完整镜头。`,
+          "",
+          "## 图像提示词",
+          `Prompt: 第${episode}集写实冷峻画面，9:16`,
+        ].join("\n"),
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      });
+    }
+
+    const result = await runStoryboardCreation({
+      projectRoot: root,
+      runtime: makeRuntime(root),
+      title: "风眼来电分镜",
+      instruction: "总计 81 镜；第1集 28 镜、第2集 27 镜、第3集 26 镜。",
+      requirements: "保留证据特写与跨集连续性。",
+      sourceText: [
+        "# 风眼来电",
+        "",
+        "### 第1集《旧频率》",
+        "第一集完整正文。",
+        "",
+        "### 第2集《抄页》",
+        "第二集完整正文。",
+        "",
+        "### 第3集《赴约》",
+        "第三集完整正文。",
+      ].join("\n"),
+      maxShots: 81,
+      projectId: "storm-eye-storyboard",
+    });
+
+    expect(chatCompletionMock).toHaveBeenCalledTimes(3);
+    for (const [index, call] of chatCompletionMock.mock.calls.entries()) {
+      const messages = call[2] as ReadonlyArray<{ role: string; content: string }>;
+      const prompt = messages[1]!.content;
+      expect(prompt).toContain(`第${index + 1}集`);
+      expect(prompt).toContain("总计 81 镜");
+      expect(prompt).toContain(`（${index + 1}/3）`);
+      if (index > 0) expect(prompt).not.toContain("第一集完整正文");
+      if (index < 2) expect(prompt).not.toContain("第三集完整正文");
+    }
+
+    const storyboard = await readFile(join(root, result.storyboardPath), "utf-8");
+    expect(storyboard).toContain("第1集完整镜头");
+    expect(storyboard).toContain("第2集完整镜头");
+    expect(storyboard).toContain("第3集完整镜头");
+    const manifest = JSON.parse(
+      await readFile(join(root, result.assetsManifestPath), "utf-8"),
+    ) as StoryboardAssetsManifest;
+    expect(manifest.assets).toHaveLength(3);
+  });
+
+  it("subdivides oversized episodes by explicit Markdown scene structure without dropping source", async () => {
+    chatCompletionMock.mockReset();
+    for (const segment of ["一场", "二场", "一集钩子", "三场", "四场", "二集钩子"]) {
+      chatCompletionMock.mockResolvedValueOnce({
+        content: `## 分镜表\n${segment}\n\n## 图像提示词\nPrompt: ${segment}画面`,
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      });
+    }
+    const sourceText = [
+      "# 风眼来电",
+      "### 第1集《旧频率》",
+      "**场次1：广播室／夜／内**",
+      "第一场唯一正文。",
+      "**场次2：值班室／夜／内**",
+      "第二场唯一正文。",
+      "**集尾钩子**",
+      "第一集钩子唯一正文。",
+      "### 第2集《抄页》",
+      "**场次1：广播室／夜／内**",
+      "第三场唯一正文。",
+      "**场次2：码头／夜／外**",
+      "第四场唯一正文。",
+      "**集尾钩子**",
+      "第二集钩子唯一正文。",
+    ].join("\n");
+
+    await runStoryboardCreation({
+      projectRoot: root,
+      runtime: makeRuntime(root),
+      title: "风眼来电分镜",
+      instruction: "总计 60 镜，各场按确认数量执行。",
+      sourceText,
+      maxShots: 60,
+      projectId: "storm-eye-scenes",
+    });
+
+    expect(chatCompletionMock).toHaveBeenCalledTimes(6);
+    const prompts = chatCompletionMock.mock.calls.map((call) =>
+      (call[2] as ReadonlyArray<{ content: string }>)[1]!.content);
+    expect(prompts[0]).toContain("第一场唯一正文");
+    expect(prompts[0]).not.toContain("第二场唯一正文");
+    expect(prompts[2]).toContain("第一集钩子唯一正文");
+    expect(prompts[3]).toContain("第三场唯一正文");
+    expect(prompts[5]).toContain("第二集钩子唯一正文");
+    expect(prompts.join("\n")).toContain("全局镜头上限不是本次镜头数");
+    for (const call of chatCompletionMock.mock.calls) {
+      expect(call[3]).toMatchObject({ maxTokens: 18_000 });
+    }
   });
 
   it("writes interactive-film story tree, flags, script, storyboard, prompts, and image assets", async () => {
@@ -329,7 +494,8 @@ describe("storyboard creation runner", () => {
     expect(graph.nodes.find((node) => node.id === "start")?.title).toBe("Opening");
   });
 
-  it("falls back to a loadable story graph when graph JSON generation fails", async () => {
+  it("fails clearly when the structured story graph worker cannot submit a graph", async () => {
+    generateStoryGraphMock.mockRejectedValueOnce(new Error("model did not submit a graph"));
     chatCompletionMock.mockResolvedValueOnce({
       content: [
         "# 回声剧场 互动影游方案",
@@ -355,22 +521,15 @@ describe("storyboard creation runner", () => {
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
     });
 
-    const result = await runInteractiveFilmCreation({
+    await expect(runInteractiveFilmCreation({
       projectRoot: root,
       runtime: makeRuntime(root),
       title: "回声剧场",
       instruction: "做一个悬疑互动影游。",
       projectId: "echo-theater",
       episodeCount: 3,
-    });
-
-    expect(result.storyGraphPath).toBe("interactive-films/echo-theater/story-graph.json");
-    const graph = await loadStoryGraph(root, "echo-theater");
-    expect(graph).not.toBeNull();
-    if (!graph) throw new Error("Expected fallback story graph");
-    expect(graph.title).toBe("回声剧场");
-    expect(graph.nodes.some((node) => node.type === "start")).toBe(true);
-    expect(graph.endings.length).toBeGreaterThanOrEqual(2);
+    })).rejects.toThrow("model did not submit a graph");
+    await expect(loadStoryGraph(root, "echo-theater")).resolves.toBeNull();
   });
 });
 

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Agent } from "@mariozechner/pi-agent-core";
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
-import { streamSimple, getModel, getEnvApiKey, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { getModel, getEnvApiKey, createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import type {
   Model,
   Api,
@@ -15,11 +15,11 @@ import type {
   UserMessage,
 } from "@mariozechner/pi-ai";
 import type { PipelineRunner } from "../pipeline/runner.js";
-import { assertWithinContextWindow, estimatePiContextTokens, guardAssistantMessageStream } from "../llm/provider.js";
 import { buildAgentSystemPrompt } from "./agent-system-prompt.js";
 import {
   createPatchChapterTextTool,
   createReplaceChapterTextTool,
+  createResyncChapterStateTool,
   createDeleteLatestChapterTool,
   createRenameEntityTool,
   createSubAgentTool,
@@ -38,6 +38,10 @@ import {
   createStoryboardCreationTool,
   createInteractiveFilmCreationTool,
   createTranslationCreateTool,
+  createFanficBookTool,
+  createContinuationImportTool,
+  createSpinoffBookTool,
+  createImitationBookTool,
   createResearchWebTool,
   createIngestMaterialTool,
   createRetrieveMaterialTool,
@@ -50,7 +54,7 @@ import {
   createNarrativeForecastGetTool,
   createNarrativeForecastSelectTool,
 } from "./forecast-tools.js";
-import { createBookContextTransform } from "./context-transform.js";
+import { createBookContextTransform, createInteractiveFilmContextTransform } from "./context-transform.js";
 import {
   appendTranscriptEvents,
   readTranscriptEvents,
@@ -81,12 +85,8 @@ import {
   sanitizeSkillTurnMessage,
   type ActivatedSkillGuidance,
 } from "./skill-tool.js";
-import {
-  agentTrajectoryHeaders,
-  beginAgentModelCall,
-  opaqueConversationId,
-  runWithAgentTrajectory,
-} from "../llm/agent-trajectory.js";
+import { opaqueConversationId, runWithAgentTrajectory } from "../llm/agent-trajectory.js";
+import { guardedPiStream } from "./pi-stream.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -191,6 +191,7 @@ interface CachedAgent {
   allowSystemFileRead: boolean;
   backgroundTaskContext: string | undefined;
   suppressProductionTools: boolean;
+  currentAttachmentPaths: string[];
   lastCommittedSeq: number;
   lastActive: number;
 }
@@ -357,37 +358,6 @@ function attachmentImages(attachments: ReadonlyArray<AgentSessionAttachment> | u
     }));
 }
 
-function guardedStreamSimple<TApi extends Api>(
-  model: Model<TApi>,
-  context: PiContext,
-  options?: SimpleStreamOptions,
-): AssistantMessageEventStream {
-  const reservedOutputTokens = Number.isFinite(options?.maxTokens)
-    ? options!.maxTokens!
-    : Number.isFinite(model.maxTokens)
-      ? model.maxTokens
-      : 4096;
-  assertWithinContextWindow({
-    piModel: model,
-    model: model.id,
-    estimatedInputTokens: estimatePiContextTokens(context),
-    reservedOutputTokens,
-  });
-  const modelCall = beginAgentModelCall();
-  const traceHeaders = agentTrajectoryHeaders(model.baseUrl, modelCall, 1, {
-    effort: String(options?.reasoning ?? (model.reasoning ? "enabled" : "disabled")),
-  });
-  return guardAssistantMessageStream(
-    model,
-    (signal) => streamSimple(model, context, {
-      ...options,
-      headers: { ...(options?.headers ?? {}), ...traceHeaders },
-      signal,
-    }),
-    options?.signal,
-  );
-}
-
 function localAssistantStopStream(model: Model<Api>): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   const message: AssistantMessage = {
@@ -410,10 +380,16 @@ function localAssistantStopStream(model: Model<Api>): AssistantMessageEventStrea
 export function isTerminalProductionToolName(toolName: unknown): boolean {
   return toolName === "propose_action"
     || toolName === "sub_agent"
+    || toolName === "resync_chapter_state"
     || toolName === "short_fiction_run"
     || toolName === "script_create"
     || toolName === "storyboard_create"
     || toolName === "interactive_film_create"
+    || toolName === "translation_create"
+    || toolName === "fanfic_create"
+    || toolName === "continuation_import"
+    || toolName === "spinoff_create"
+    || toolName === "imitation_create"
     || toolName === "generate_cover"
     || toolName === "play_start"
     || toolName === "play_edit"
@@ -438,8 +414,7 @@ function hasUnansweredTerminalToolResult(messages: AgentMessage[]): boolean {
     }
     if (role !== "toolResult") continue;
     const toolName = (message as { toolName?: unknown }).toolName;
-    const isError = (message as { isError?: unknown }).isError;
-    if (isTerminalProductionToolName(toolName) && isError !== true) {
+    if (isTerminalProductionToolName(toolName)) {
       return !assistantTextAfterTool;
     }
   }
@@ -784,8 +759,13 @@ const PRODUCTION_MUTATION_TOOL_NAMES = new Set([
   "rename_entity",
   "patch_chapter_text",
   "replace_chapter_text",
+  "resync_chapter_state",
   "delete_latest_chapter",
   "import_chapters",
+  "fanfic_create",
+  "continuation_import",
+  "spinoff_create",
+  "imitation_create",
 ]);
 
 type CreateAgentToolsForModeParams = {
@@ -803,6 +783,7 @@ type CreateAgentToolsForModeParams = {
   readonly playWorldExists: boolean;
   readonly intentSkillTool?: ReturnType<typeof createUseSkillTool>;
   readonly requestedSkillIds?: () => ReadonlyArray<string>;
+  readonly attachmentPaths?: () => ReadonlyArray<string>;
   readonly activeSkills?: () => ReadonlyArray<ActivatedSkillGuidance>;
   readonly workerSkills?: (agent: string) => ReadonlyArray<ActivatedSkillGuidance>;
   readonly productionSkills?: (capability: ProductionSkillCapability) => ReadonlyArray<ActivatedSkillGuidance>;
@@ -824,10 +805,12 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
   const proposalTool = createProposeActionTool(lang, {
     sameSession: params.sessionKind !== "chat",
     requestedSkillIds: params.requestedSkillIds,
+    attachmentPaths: params.attachmentPaths,
   });
   const researchTool = createResearchWebTool(params.projectRoot);
   const materialTool = createIngestMaterialTool(params.projectRoot);
   const materialRetrievalTool = createRetrieveMaterialTool(params.projectRoot);
+  const projectReadTool = createReadTool(params.projectRoot, { scope: "project" });
   const importChaptersTool = createImportChaptersTool(params.pipeline, params.bookId, params.projectRoot);
   const isConfirmed = (
     intent: NonNullable<AgentSessionConfig["requestedIntent"]>,
@@ -839,6 +822,30 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
   if (params.sessionKind === "chat") {
     if (isConfirmed("translation_create")) {
       return [createTranslationCreateTool(params.projectRoot, { actionPayload: params.actionPayload })];
+    }
+    if (isConfirmed("fanfic_init")) {
+      return [createFanficBookTool(params.pipeline, params.projectRoot, {
+        defaultSkills: params.productionSkills?.("longWriting"),
+        activeSkills: params.activeSkills,
+      })];
+    }
+    if (isConfirmed("continuation_import")) {
+      return [createContinuationImportTool(params.pipeline, params.bookId, params.projectRoot, {
+        defaultSkills: params.productionSkills?.("longWriting"),
+        activeSkills: params.activeSkills,
+      })];
+    }
+    if (isConfirmed("spinoff_create")) {
+      return [createSpinoffBookTool(params.pipeline, params.projectRoot, {
+        defaultSkills: params.productionSkills?.("longWriting"),
+        activeSkills: params.activeSkills,
+      })];
+    }
+    if (isConfirmed("style_imitation")) {
+      return [createImitationBookTool(params.pipeline, params.projectRoot, {
+        defaultSkills: params.productionSkills?.("longWriting"),
+        activeSkills: params.activeSkills,
+      })];
     }
     return [proposalTool, researchTool, materialTool, materialRetrievalTool, importChaptersTool];
   }
@@ -867,7 +874,7 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
         activeSkills: params.activeSkills,
       })];
     }
-    return [proposalTool, materialTool, materialRetrievalTool];
+    return [proposalTool, projectReadTool, materialTool, materialRetrievalTool];
   }
 
   if (params.sessionKind === "storyboard") {
@@ -879,7 +886,7 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
         activeSkills: params.activeSkills,
       })];
     }
-    return [proposalTool, materialTool, materialRetrievalTool];
+    return [proposalTool, projectReadTool, materialTool, materialRetrievalTool];
   }
 
   if (params.sessionKind === "interactive-film") {
@@ -891,7 +898,7 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
         activeSkills: params.activeSkills,
       })];
     }
-    return [proposalTool, materialTool, materialRetrievalTool];
+    return [proposalTool, projectReadTool, materialTool, materialRetrievalTool];
   }
 
   if (params.sessionKind === "interactive-film-authoring") {
@@ -970,6 +977,11 @@ function createModeTools(params: CreateAgentToolsForModeParams) {
     createRenameEntityTool(params.pipeline, params.projectRoot, params.bookId),
     createPatchChapterTextTool(params.pipeline, params.projectRoot, params.bookId),
     createReplaceChapterTextTool(params.pipeline, params.projectRoot, params.bookId),
+    createResyncChapterStateTool(params.pipeline, params.bookId, {
+      language: lang,
+      defaultSkills: params.productionSkills?.("longWriting"),
+      activeSkills: params.activeSkills,
+    }),
     createDeleteLatestChapterTool(params.projectRoot, params.bookId),
     researchTool,
     materialTool,
@@ -1163,6 +1175,7 @@ async function runAgentSessionUnlocked(
       playWorldExists,
       intentSkillTool,
       requestedSkillIds: () => [...turnSkills.keys()],
+      attachmentPaths: () => cached?.currentAttachmentPaths ?? [],
       activeSkills: () => [...turnSkills.values()],
       workerSkills: (agent) => {
         if (agent === "architect" || agent === "writer") return productionSkills("longWriting");
@@ -1182,7 +1195,9 @@ async function runAgentSessionUnlocked(
           : agentTools,
         messages: initialAgentMessages,
       },
-      transformContext: createBookContextTransform(bookId, projectRoot, { onContextCompression }),
+      transformContext: sessionKind === "interactive-film-authoring" && bookId
+        ? createInteractiveFilmContextTransform(bookId, projectRoot)
+        : createBookContextTransform(bookId, projectRoot, { onContextCompression }),
       convertToLlm: (messages) => {
         terminalToolResultTail = hasUnansweredTerminalToolResult(messages);
         return convertAgentMessagesForModel(messages, model);
@@ -1193,7 +1208,7 @@ async function runAgentSessionUnlocked(
           return localAssistantStopStream(streamModel);
         }
         if (isLlmStubEnabled()) return stubAgentStream(streamModel, context);
-        return guardedStreamSimple(streamModel, context, options);
+        return guardedPiStream(streamModel, context, options);
       },
       getApiKey: (provider: string) => {
         if (config.apiKey) return config.apiKey;
@@ -1219,6 +1234,9 @@ async function runAgentSessionUnlocked(
       allowSystemFileRead,
       backgroundTaskContext: config.backgroundTaskContext,
       suppressProductionTools,
+      currentAttachmentPaths: (config.attachments ?? [])
+        .map((attachment) => attachment.storedPath?.trim())
+        .filter((path): path is string => Boolean(path)),
       lastCommittedSeq: currentCommittedSeq ?? await latestCommittedSeq(projectRoot, sessionId),
       lastActive: Date.now(),
     };
@@ -1227,6 +1245,9 @@ async function runAgentSessionUnlocked(
   }
 
   cached.lastActive = Date.now();
+  cached.currentAttachmentPaths = (config.attachments ?? [])
+    .map((attachment) => attachment.storedPath?.trim())
+    .filter((path): path is string => Boolean(path));
   cached.turnSkills.clear();
   for (const skill of skillResolution.usedSkills) {
     cached.turnSkills.set(skill.id, { skill, resources: [] });

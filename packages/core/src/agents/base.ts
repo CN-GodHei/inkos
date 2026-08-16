@@ -1,5 +1,6 @@
 import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress } from "../llm/provider.js";
-import { runWorkerAgent } from "../agent/worker-agent.js";
+import { runWorkerAgent, runWorkerAgentTool, type WorkerResultTool } from "../agent/worker-agent.js";
+import type { Static, TSchema } from "@sinclair/typebox";
 import { appendPromptPackGuidance } from "../prompts/prompt-pack.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
 import type { Logger } from "../utils/logger.js";
@@ -39,6 +40,23 @@ export abstract class BaseAgent {
       onStreamProgress: this.ctx.onStreamProgress,
       signal: this.ctx.signal,
     });
+  }
+
+  protected async submitStructured<TParameters extends TSchema>(
+    messages: ReadonlyArray<LLMMessage>,
+    resultTool: WorkerResultTool<TParameters>,
+    options?: { readonly temperature?: number; readonly maxTokens?: number },
+  ): Promise<Static<TParameters>> {
+    return runWorkerAgentTool(
+      this.ctx.client,
+      this.ctx.model,
+      appendActivatedSkillGuidance(messages, this.ctx.activatedSkills),
+      resultTool,
+      {
+        ...options,
+        signal: this.ctx.signal,
+      },
+    );
   }
 
   protected async withPromptPackGuidance(basePrompt: string, promptId: string): Promise<string> {

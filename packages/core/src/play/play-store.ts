@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join, normalize, sep } from "node:path";
 import { z } from "zod";
@@ -83,6 +83,10 @@ export class PlayStore {
       "utf-8",
     );
     return world;
+  }
+
+  async removeWorld(worldId: string): Promise<void> {
+    await rm(this.worldDir(worldId), { recursive: true, force: true });
   }
 
   async updateWorld(worldId: string, patch: Partial<Pick<PlayWorld, "premise" | "worldContract" | "visualContract" | "mode">>): Promise<PlayWorld> {

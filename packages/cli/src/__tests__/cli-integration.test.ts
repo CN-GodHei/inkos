@@ -576,7 +576,7 @@ describe("CLI integration", () => {
 
       await expect(readFile(join(projectDir, ".nvmrc"), "utf-8")).resolves.toBe("22\n");
       await expect(readFile(join(projectDir, ".node-version"), "utf-8")).resolves.toBe("22\n");
-    }, CLI_PROCESS_TIMEOUT_MS);
+    }, DOUBLE_CLI_INVOCATION_TEST_TIMEOUT_MS);
 
     it("treats localhost OpenAI-compatible endpoints as API-key optional", async () => {
       await stat(join(projectDir, "inkos.json")).catch(() => {

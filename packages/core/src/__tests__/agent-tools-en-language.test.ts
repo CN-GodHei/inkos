@@ -174,6 +174,7 @@ describe("agent tools language wiring (en parity)", () => {
       action: "short_run",
       instruction: "Write a complete English suspense short story.",
       shortRun: {
+        title: "The Missing Ledger",
         direction: "an office suspense story about forged expense records",
         language: "en",
         chapters: 12,
@@ -198,6 +199,7 @@ describe("agent tools language wiring (en parity)", () => {
       action: "short_run",
       instruction: "Write a complete English suspense short story.",
       shortRun: {
+        title: "The Missing Ledger",
         direction: "an office suspense story about forged expense records",
         chapters: 12,
         charsPerChapter: 650,
@@ -215,6 +217,7 @@ describe("agent tools language wiring (en parity)", () => {
       action: "short_run",
       instruction: "用户在中文对话里要求写一篇英文办公室悬疑短篇",
       shortRun: {
+        title: "The Missing Ledger",
         direction: "an English office suspense story about forged expense records",
         language: "en",
         chapters: 12,
@@ -239,6 +242,7 @@ describe("agent tools language wiring (en parity)", () => {
       action: "short_run",
       instruction: "用户在中文对话里要求写一篇英文短篇，未指定每章字数",
       shortRun: {
+        title: "The Missing Ledger",
         direction: "an English office suspense story",
         language: "en",
         cover: false,

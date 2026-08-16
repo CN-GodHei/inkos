@@ -28,6 +28,12 @@ export interface StoryboardCreationInput {
   readonly granularity?: string;
   readonly maxShots?: number;
   readonly language?: "zh" | "en";
+  readonly segment?: {
+    readonly label: string;
+    readonly index: number;
+    readonly count: number;
+    readonly estimatedShots: number;
+  };
 }
 
 export interface InteractiveFilmCreationInput {
@@ -393,6 +399,11 @@ function buildStoryboardCreationUserPrompt(input: StoryboardCreationInput, langu
       "## Full Source Material",
       input.sourceText?.trim()
         || "The user did not provide full source material; write an extensible storyboard draft strictly from the storyboard spec and user requirements.",
+      ...(input.segment ? [
+        "",
+        "## Current Production Segment",
+        `Write only ${input.segment.label} (${input.segment.index + 1}/${input.segment.count}) in this call. The global shot cap is NOT the shot count for this call. Preserve all global requirements and follow the exact scene/segment shot count when the user confirmed one. Do not summarize or write any other segment.`,
+      ] : []),
       "",
       "## Output Format",
       `# ${input.title} Storyboard`,
@@ -412,6 +423,11 @@ function buildStoryboardCreationUserPrompt(input: StoryboardCreationInput, langu
     "",
     "## 完整源素材",
     input.sourceText?.trim() || "用户没有提供完整源素材；请严格根据分镜规格和用户要求写一个可继续扩展的分镜稿。",
+    ...(input.segment ? [
+      "",
+      "## 当前生产分段",
+      `本次只写${input.segment.label}（${input.segment.index + 1}/${input.segment.count}）。全局镜头上限不是本次镜头数。保留全部全局要求；用户已确认本场/本段镜头数时严格按该数量执行。不要概括或生成任何其他分段。`,
+    ] : []),
     "",
     "## 输出格式",
     `# ${input.title} 分镜`,
@@ -544,8 +560,10 @@ function estimateScriptMaxTokens(input: ScriptCreationInput): number {
 }
 
 function estimateStoryboardMaxTokens(input: StoryboardCreationInput): number {
-  const shots = input.maxShots ?? 24;
-  return Math.min(24000, Math.max(10000, shots * 700));
+  const shots = input.segment?.estimatedShots ?? input.maxShots ?? 24;
+  // Each shot includes both an editable shot record and a standalone image
+  // prompt. The old 700-token estimate cut off complete 13-shot scenes.
+  return Math.min(48000, Math.max(12000, shots * 1800));
 }
 
 function estimateInteractiveFilmMaxTokens(input: InteractiveFilmCreationInput): number {
@@ -557,7 +575,11 @@ function extractPromptLines(markdown: string): string[] {
   const prompts: string[] = [];
   let promptColumnIndex = -1;
   for (const rawLine of markdown.split(/\r?\n/)) {
-    const line = rawLine.trim();
+    const line = rawLine
+      .trim()
+      .replace(/^`{1,3}\s*/u, "")
+      .replace(/\s*`{1,3}$/u, "")
+      .trim();
     if (!line) {
       promptColumnIndex = -1;
       continue;
@@ -603,6 +625,8 @@ function isPromptColumnHeader(cell: string): boolean {
 
 function cleanPromptText(text: string): string {
   return text
+    .replace(/^`{1,3}\s*/u, "")
+    .replace(/\s*`{1,3}$/u, "")
     .replace(/\s*\|\s*$/u, "")
     .replace(/\*\*$/u, "")
     .replace(/^(?:Prompt(?:\s+for\s+[^:*：]+)?|提示词(?:\s*[^:*：]+)?|图像提示词|分镜图提示词)\s*[：:]\s*/iu, "")

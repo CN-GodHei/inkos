@@ -1,12 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runWorkerAgent } from "../agent/worker-agent.js";
+import { Type } from "@sinclair/typebox";
+import { runWorkerAgent, runWorkerAgentTool } from "../agent/worker-agent.js";
 import { BaseAgent, type AgentContext } from "../agents/base.js";
 
 const chatCompletionMock = vi.hoisted(() => vi.fn());
+const guardedPiStreamMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../llm/provider.js", () => ({
   chatCompletion: chatCompletionMock,
 }));
+
+vi.mock("../agent/pi-stream.js", async () => {
+  const actual = await vi.importActual<typeof import("../agent/pi-stream.js")>("../agent/pi-stream.js");
+  return { ...actual, guardedPiStream: guardedPiStreamMock };
+});
 
 function client(): AgentContext["client"] {
   return {
@@ -47,6 +54,7 @@ class TwoStepWorker extends BaseAgent {
 describe("Pi worker harness", () => {
   beforeEach(() => {
     chatCompletionMock.mockReset();
+    guardedPiStreamMock.mockReset();
   });
 
   afterEach(() => {
@@ -126,5 +134,55 @@ describe("Pi worker harness", () => {
 
     await expect(running).rejects.toThrow("user stopped");
     expect(chatCompletionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits host-consumed state through one typed Pi tool call", async () => {
+    const { createAssistantMessageEventStream } = await import("@mariozechner/pi-ai");
+    guardedPiStreamMock.mockImplementation((model: AgentContext["client"]["_piModel"]) => {
+      const stream = createAssistantMessageEventStream();
+      const message = {
+        role: "assistant" as const,
+        content: [{
+          type: "toolCall" as const,
+          id: "state-1",
+          name: "submit_state",
+          arguments: { label: "母亲", status: "等待退烧药" },
+        }],
+        api: model?.api ?? "openai-completions",
+        provider: model?.provider ?? "openai",
+        model: model?.id ?? "deepseek-v4-flash",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "toolUse" as const,
+        timestamp: Date.now(),
+      };
+      stream.push({ type: "done", reason: "toolUse", message });
+      stream.end(message);
+      return stream;
+    });
+
+    const result = await runWorkerAgentTool(
+      client(),
+      "deepseek-v4-flash",
+      [{ role: "user", content: "登记当前角色状态" }],
+      {
+        name: "submit_state",
+        label: "提交状态",
+        description: "提交角色状态。",
+        parameters: Type.Object({
+          label: Type.String(),
+          status: Type.String(),
+        }),
+      },
+    );
+
+    expect(result).toEqual({ label: "母亲", status: "等待退烧药" });
+    expect(guardedPiStreamMock).toHaveBeenCalledTimes(1);
   });
 });

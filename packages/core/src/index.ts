@@ -240,7 +240,10 @@ export {
   ActionSourceSchema,
   ActionPayloadSchema,
   CreateBookActionPayloadSchema,
+  ContinuationImportActionPayloadSchema,
+  FanficCreateActionPayloadSchema,
   GenerateCoverActionPayloadSchema,
+  ImitationCreateActionPayloadSchema,
   InteractiveFilmCreateActionPayloadSchema,
   PlayStartActionPayloadSchema,
   RequestedIntentSchema,
@@ -248,6 +251,7 @@ export {
   ScriptCreateActionPayloadSchema,
   ScriptTargetFormatSchema,
   ShortRunActionPayloadSchema,
+  SpinoffCreateActionPayloadSchema,
   StoryboardCreateActionPayloadSchema,
   WriteNextActionPayloadSchema,
   type ActionSource,
@@ -672,8 +676,6 @@ export {
 } from "./interactive-film/graph-store.js";
 export {
   generateStoryGraph,
-  buildStoryGraphFromLLMText,
-  extractJson,
   type GenerateStoryGraphInput,
 } from "./interactive-film/generate.js";
 export {
@@ -705,10 +707,6 @@ export {
   buildUpsertCharactersDelta,
 } from "./interactive-film/authoring-tools.js";
 export { writeCharacterFacts, readCharacterVoices } from "./interactive-film/memory-link.js";
-export {
-  buildFillNodeDeltaFromLLMText,
-  buildStructureDeltaFromLLMText,
-} from "./interactive-film/authoring-generate.js";
 export { summarizeStoryGraph, buildFilmAuthoringContext } from "./interactive-film/film-context.js";
 export {
   generateNodeImage,

@@ -22,6 +22,7 @@ import {
   extractErrorMessage,
   hasAnyInFlightExecution,
   markRunningToolsFailed,
+  mergeToolExecution,
   mergeTaskExecution,
   mergeSessionIds,
   updateSession,
@@ -76,9 +77,19 @@ function formatUserMessageForDisplay(text: string, attachments: ReadonlyArray<Ch
   return lines.join("\n");
 }
 
-export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions> = (set, get) => ({
-  activateSession: (sessionId) =>
-    set({ activeSessionId: sessionId }),
+export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions> = (set, get) => {
+  const abortPreviousChatRound = (nextSessionId: string | null): void => {
+    const previousSessionId = get().activeSessionId;
+    if (!previousSessionId || previousSessionId === nextSessionId) return;
+    if (!get().sessions[previousSessionId]?.isChatStreaming) return;
+    void get().abortSession(previousSessionId, "chat");
+  };
+
+  return {
+    activateSession: (sessionId) => {
+      abortPreviousChatRound(sessionId);
+      set({ activeSessionId: sessionId });
+    },
 
   setSessionPlayMode: (sessionId, playMode) => {
     const session = get().sessions[sessionId];
@@ -223,6 +234,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   createSession: async (bookId, sessionKind, playMode) => {
+    abortPreviousChatRound(null);
     const data = await fetchJson<SessionResponse>("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -261,6 +273,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   createDraftSession: (bookId, sessionKind, playMode) => {
+    abortPreviousChatRound(null);
     // 前端生成 sessionId（与后端 createBookSession 同格式），暂不持久化到磁盘，
     // 也暂不写入 sessionIdsByBook——侧边栏看不到这条 draft。
     // 发送第一条消息时 sendMessage 会调 POST /sessions { sessionId, bookId } 落盘
@@ -340,22 +353,30 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     });
   },
 
-  abortSession: async (sessionId) => {
+  abortSession: async (sessionId, scope = "all") => {
     const session = get().sessions[sessionId];
-    session?.stream?.close();
     const stoppedAt = Date.now();
     const stoppedMessage = tr("已由用户停止", "Stopped by user");
+    const chatOnly = scope === "chat";
+    const messages = markRunningToolsFailed(
+      session?.messages ?? [],
+      stoppedMessage,
+      stoppedAt,
+      (execution) => !chatOnly || execution.background !== true,
+    );
+    const keepProductionStream = chatOnly && hasAnyInFlightExecution(messages);
+    if (!keepProductionStream) session?.stream?.close();
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (runtime) => ({
-        isStreaming: false,
+        isStreaming: keepProductionStream,
         isChatStreaming: false,
-        stream: null,
+        stream: keepProductionStream ? runtime.stream : null,
         lastError: null,
-        messages: markRunningToolsFailed(runtime.messages, stoppedMessage, stoppedAt),
+        messages,
       })),
     }));
     try {
-      await fetchJson(`/sessions/${sessionId}/abort`, {
+      await fetchJson(`/sessions/${sessionId}/abort${chatOnly ? "?scope=chat" : ""}`, {
         method: "POST",
       });
     } catch (error) {
@@ -591,11 +612,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         if (responseToolExecutions.length === 0) return;
         set((state) => ({
           sessions: updateSession(state.sessions, sessionId, (runtime) => ({
-            messages: runtime.messages.map((message) => (
-              message.timestamp === streamTs && message.role === "assistant"
-                ? withToolExecutions(message, responseToolExecutions)
-                : message
-            )),
+            messages: responseToolExecutions.reduce<ReadonlyArray<(typeof runtime.messages)[number]>>(
+              (messages, execution) => mergeToolExecution(messages, execution),
+              runtime.messages,
+            ),
           })),
         }));
       };
@@ -716,5 +736,6 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       sessions: updateSession(state.sessions, sessionId, () => ({ lastFailedSend: undefined })),
     }));
     await get().sendMessage(sessionId, failed.text, failed.options);
-  },
-});
+    },
+  };
+};

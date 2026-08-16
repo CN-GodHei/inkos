@@ -8,7 +8,10 @@ import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel, LLMConfig, AgentLLMOverride, InputGovernanceMode } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
-import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
+import {
+  FoundationReviewerAgent,
+  FoundationReviewParseError,
+} from "../agents/foundation-reviewer.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent, composeGovernedChapter, contextBudgetFromClient, type ComposeChapterOutput } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
@@ -57,6 +60,7 @@ import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
 import { selectBookReferenceContext } from "../references/reference-context.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
+import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -377,6 +381,13 @@ export interface ReviseResult {
   readonly fixedIssues: ReadonlyArray<string>;
   readonly applied: boolean;
   readonly status: "unchanged" | "ready-for-review" | "audit-failed";
+  readonly auditPassed?: boolean;
+  readonly auditIssues?: ReadonlyArray<{
+    readonly severity: AuditIssue["severity"];
+    readonly category: string;
+    readonly description: string;
+    readonly suggestion?: string;
+  }>;
   readonly skippedReason?: string;
   readonly revisionDiagnostics?: {
     readonly standard: string;
@@ -588,14 +599,24 @@ export class PipelineRunner {
         en: `reviewing foundation (round ${attempt + 1})`,
       });
 
-      const review = await params.reviewer.review({
-        foundation,
-        mode: params.mode,
-        sourceCanon: params.sourceCanon,
-        styleGuide: params.styleGuide,
-        language: params.language,
-        targetChapters: params.targetChapters,
-      });
+      let review;
+      try {
+        review = await params.reviewer.review({
+          foundation,
+          mode: params.mode,
+          sourceCanon: params.sourceCanon,
+          styleGuide: params.styleGuide,
+          language: params.language,
+          targetChapters: params.targetChapters,
+        });
+      } catch (error) {
+        if (!(error instanceof FoundationReviewParseError)) throw error;
+        this.logWarn(params.stageLanguage, {
+          zh: `基础设定审核输出无法解析，已保留当前版本且不会自动重生成：${error.message}`,
+          en: `Foundation review output could not be parsed; keeping the current version without automatic regeneration: ${error.message}`,
+        });
+        return foundation;
+      }
 
       this.config.logger?.info(
         `Foundation review: ${review.totalScore}/100 ${review.passed ? "PASSED" : "REJECTED"}`,
@@ -617,14 +638,24 @@ export class PipelineRunner {
     }
 
     // Final review
-    const finalReview = await params.reviewer.review({
-      foundation,
-      mode: params.mode,
-      sourceCanon: params.sourceCanon,
-      styleGuide: params.styleGuide,
-      language: params.language,
-      targetChapters: params.targetChapters,
-    });
+    let finalReview;
+    try {
+      finalReview = await params.reviewer.review({
+        foundation,
+        mode: params.mode,
+        sourceCanon: params.sourceCanon,
+        styleGuide: params.styleGuide,
+        language: params.language,
+        targetChapters: params.targetChapters,
+      });
+    } catch (error) {
+      if (!(error instanceof FoundationReviewParseError)) throw error;
+      this.logWarn(params.stageLanguage, {
+        zh: `基础设定最终审核输出无法解析，已保留当前版本：${error.message}`,
+        en: `Final foundation review output could not be parsed; keeping the current version: ${error.message}`,
+      });
+      return foundation;
+    }
     this.config.logger?.info(
       `Foundation final review: ${finalReview.totalScore}/100 ${finalReview.passed ? "PASSED" : "ACCEPTED (max retries)"}`,
     );
@@ -1465,6 +1496,16 @@ export class PipelineRunner {
         chapterLengthTarget,
         lengthLanguage,
       );
+      const baselineChapter = targetChapter - 1;
+      const baselineStoryDir = join(bookDir, "story", "snapshots", String(baselineChapter));
+      const [baselineState, baselineHooks] = await Promise.all([
+        readFile(join(baselineStoryDir, "current_state.md"), "utf-8"),
+        readFile(join(baselineStoryDir, "pending_hooks.md"), "utf-8"),
+      ]).catch((error) => {
+        throw new Error(
+          `Cannot revise chapter ${targetChapter} safely: baseline snapshot ${baselineChapter} is unavailable (${String(error)})`,
+        );
+      });
 
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
       this.logStage(stageLanguage, {
@@ -1486,8 +1527,9 @@ export class PipelineRunner {
               contextPackage: reviseControlInput.composed.contextPackage,
               ruleStack: reviseControlInput.composed.ruleStack,
               lengthSpec,
+              baselineChapter,
             }
-          : { lengthSpec },
+          : { lengthSpec, baselineChapter },
       );
 
       if (reviseOutput.revisedContent.length === 0) {
@@ -1499,6 +1541,80 @@ export class PipelineRunner {
         chapterContent: reviseOutput.revisedContent,
         lengthSpec,
       });
+      const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+      const stateValidator = new StateValidatorAgent(this.agentCtxFor("stateValidator", bookId));
+      let settledRevision = await writer.settleChapterState({
+        book,
+        bookDir,
+        chapterNumber: targetChapter,
+        baselineChapter,
+        title: chapterMeta.title,
+        content: normalizedRevision.content,
+        chapterIntent: reviseControlInput?.plan.intentMarkdown,
+        contextPackage: reviseControlInput?.composed.contextPackage,
+        ruleStack: reviseControlInput?.composed.ruleStack,
+      });
+      let stateValidation = await stateValidator.validate(
+        normalizedRevision.content,
+        targetChapter,
+        baselineState,
+        settledRevision.updatedState,
+        baselineHooks,
+        settledRevision.updatedHooks,
+        language,
+      );
+      if (!stateValidation.passed || stateValidation.repairRequired) {
+        const recovery = await retrySettlementAfterValidationFailure({
+          writer,
+          validator: stateValidator,
+          book,
+          bookDir,
+          chapterNumber: targetChapter,
+          baselineChapter,
+          title: chapterMeta.title,
+          content: normalizedRevision.content,
+          reducedControlInput: reviseControlInput
+            ? {
+                chapterIntent: reviseControlInput.plan.intentMarkdown,
+                contextPackage: reviseControlInput.composed.contextPackage,
+                ruleStack: reviseControlInput.composed.ruleStack,
+              }
+            : undefined,
+          oldState: baselineState,
+          oldHooks: baselineHooks,
+          originalValidation: stateValidation,
+          language,
+          logger: this.config.logger,
+        });
+        if (recovery.kind === "degraded") {
+          return {
+            chapterNumber: targetChapter,
+            wordCount: countChapterLength(content, countingMode),
+            fixedIssues: [],
+            applied: false,
+            status: "unchanged",
+            auditPassed: false,
+            auditIssues: recovery.issues,
+            skippedReason: `Revision kept the original chapter because state settlement did not validate after retry.`,
+            revisionDiagnostics: {
+              standard: "Revision text and derived story state must both validate before any file is replaced.",
+              before: {
+                blockingCount: preRevision.blockingCount,
+                criticalCount: preRevision.criticalCount,
+                aiTellCount: preRevision.aiTellCount,
+              },
+              after: {
+                blockingCount: preRevision.blockingCount,
+                criticalCount: preRevision.criticalCount,
+                aiTellCount: preRevision.aiTellCount,
+              },
+              remainingIssues: recovery.issues,
+            },
+          };
+        }
+        settledRevision = recovery.output;
+        stateValidation = recovery.validation;
+      }
       const postRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -1514,17 +1630,17 @@ export class PipelineRunner {
               contextPackage: reviseControlInput.composed.contextPackage,
               ruleStack: reviseControlInput.composed.ruleStack,
               truthFileOverrides: {
-                currentState: reviseOutput.updatedState !== "(状态卡未更新)" ? reviseOutput.updatedState : undefined,
-                ledger: reviseOutput.updatedLedger !== "(账本未更新)" ? reviseOutput.updatedLedger : undefined,
-                hooks: reviseOutput.updatedHooks !== "(伏笔池未更新)" ? reviseOutput.updatedHooks : undefined,
+                currentState: settledRevision.updatedState,
+                ledger: settledRevision.updatedLedger || undefined,
+                hooks: settledRevision.updatedHooks,
               },
             }
           : {
               temperature: 0,
               truthFileOverrides: {
-                currentState: reviseOutput.updatedState !== "(状态卡未更新)" ? reviseOutput.updatedState : undefined,
-                ledger: reviseOutput.updatedLedger !== "(账本未更新)" ? reviseOutput.updatedLedger : undefined,
-                hooks: reviseOutput.updatedHooks !== "(伏笔池未更新)" ? reviseOutput.updatedHooks : undefined,
+                currentState: settledRevision.updatedState,
+                ledger: settledRevision.updatedLedger || undefined,
+                hooks: settledRevision.updatedHooks,
               },
             },
       });
@@ -1560,17 +1676,31 @@ export class PipelineRunner {
         : revisionGate === "lenient"
           ? didNotWorsen
           : didNotWorsen && (improvedBlocking || improvedAITells);
+      const remainingIssues = effectivePostRevision.revisionBlockingIssues
+        .filter((issue) => issue.severity === "warning" || issue.severity === "critical")
+        .slice(0, 6)
+        .map((issue) => ({
+          severity: issue.severity,
+          category: issue.category,
+          description: issue.description,
+          ...(issue.suggestion ? { suggestion: issue.suggestion } : {}),
+        }));
+      const revisionDiagnostics = {
+        standard: REVISION_GATE_STANDARDS[revisionGate],
+        before: {
+          blockingCount: preRevision.blockingCount,
+          criticalCount: preRevision.criticalCount,
+          aiTellCount: preRevision.aiTellCount,
+        },
+        after: {
+          blockingCount: effectivePostRevision.blockingCount,
+          criticalCount: effectivePostRevision.criticalCount,
+          aiTellCount: effectivePostRevision.aiTellCount,
+        },
+        remainingIssues,
+      };
 
       if (!shouldApplyRevision) {
-        const remainingIssues = effectivePostRevision.revisionBlockingIssues
-          .filter((issue) => issue.severity === "warning" || issue.severity === "critical")
-          .slice(0, 6)
-          .map((issue) => ({
-            severity: issue.severity,
-            category: issue.category,
-            description: issue.description,
-            ...(issue.suggestion ? { suggestion: issue.suggestion } : {}),
-          }));
         return {
           chapterNumber: targetChapter,
           wordCount: revisionBaseCount,
@@ -1578,20 +1708,9 @@ export class PipelineRunner {
           applied: false,
           status: "unchanged",
           skippedReason: `Manual revision kept original chapter: before blocking=${preRevision.blockingCount}, critical=${preRevision.criticalCount}, aiTell=${preRevision.aiTellCount}; after blocking=${effectivePostRevision.blockingCount}, critical=${effectivePostRevision.criticalCount}, aiTell=${effectivePostRevision.aiTellCount}.`,
-          revisionDiagnostics: {
-            standard: REVISION_GATE_STANDARDS[revisionGate],
-            before: {
-              blockingCount: preRevision.blockingCount,
-              criticalCount: preRevision.criticalCount,
-              aiTellCount: preRevision.aiTellCount,
-            },
-            after: {
-              blockingCount: effectivePostRevision.blockingCount,
-              criticalCount: effectivePostRevision.criticalCount,
-              aiTellCount: effectivePostRevision.aiTellCount,
-            },
-            remainingIssues,
-          },
+          auditPassed: effectivePostRevision.auditResult.passed,
+          auditIssues: remainingIssues,
+          revisionDiagnostics,
         };
       }
       this.logLengthWarnings(lengthWarnings);
@@ -1613,26 +1732,19 @@ export class PipelineRunner {
       const reviseHeading = reviseLang === "en"
         ? `# Chapter ${targetChapter}: ${chapterMeta.title}`
         : `# 第${targetChapter}章 ${chapterMeta.title}`;
-      await writeFile(
-        join(chaptersDir, existingFile),
-        `${reviseHeading}\n\n${normalizedRevision.content}`,
-        "utf-8",
-      );
 
       // Only the latest chapter owns current truth. Reworking an older chapter
       // invalidates its descendants, but must not rewind the live story state.
       if (isLatestChapter) {
-        const storyDir = join(bookDir, "story");
-        if (reviseOutput.updatedState !== "(状态卡未更新)") {
-          await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
-        }
-        if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
-          await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
-        }
-        if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
-          await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
-        }
-        await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter);
+        await writer.saveChapter(bookDir, settledRevision, gp.numericalSystem, reviseLang);
+      } else {
+        await commitAtomicFileSet({
+          rootDir: bookDir,
+          writes: [{
+            relativePath: join("chapters", existingFile),
+            content: `${reviseHeading}\n\n${normalizedRevision.content}`,
+          }],
+        });
       }
 
       // Update index
@@ -1700,6 +1812,9 @@ export class PipelineRunner {
         fixedIssues: reviseOutput.fixedIssues,
         applied: true,
         status: effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed",
+        auditPassed: effectivePostRevision.auditResult.passed,
+        auditIssues: remainingIssues,
+        revisionDiagnostics,
         lengthWarnings,
         lengthTelemetry,
       };
@@ -1828,6 +1943,24 @@ export class PipelineRunner {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
       return await this._resyncChapterArtifactsLocked(bookId, chapterNumber);
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  async resyncChapterStateAndAudit(
+    bookId: string,
+    chapterNumber?: number,
+    options: { readonly allowNewHooks?: boolean } = {},
+  ): Promise<{
+    readonly chapter: ChapterPipelineResult;
+    readonly audit: AuditResult & { readonly chapterNumber: number };
+  }> {
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    try {
+      const chapter = await this._resyncChapterArtifactsLocked(bookId, chapterNumber, options);
+      const audit = await this.auditDraft(bookId, chapter.chapterNumber);
+      return { chapter, audit };
     } finally {
       await releaseLock();
     }
@@ -2267,17 +2400,23 @@ export class PipelineRunner {
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const content = await this.readChapterContent(bookDir, targetChapter);
-    const storyDir = join(bookDir, "story");
+    const baselineChapter = targetChapter - 1;
+    const baselineStoryDir = join(bookDir, "story", "snapshots", String(baselineChapter));
     const [oldState, oldHooks] = await Promise.all([
-      readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
-      readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
-    ]);
+      readFile(join(baselineStoryDir, "current_state.md"), "utf-8"),
+      readFile(join(baselineStoryDir, "pending_hooks.md"), "utf-8"),
+    ]).catch((error) => {
+      throw new Error(
+        `Cannot repair chapter ${targetChapter} safely: baseline snapshot ${baselineChapter} is unavailable (${String(error)})`,
+      );
+    });
 
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
     let repairedOutput = await writer.settleChapterState({
       book,
       bookDir,
       chapterNumber: targetChapter,
+      baselineChapter,
       title: targetMeta.title,
       content,
       allowReapply: true,
@@ -2300,6 +2439,7 @@ export class PipelineRunner {
         book,
         bookDir,
         chapterNumber: targetChapter,
+        baselineChapter,
         title: targetMeta.title,
         content,
         oldState,
@@ -2360,7 +2500,11 @@ export class PipelineRunner {
     };
   }
 
-  private async _resyncChapterArtifactsLocked(bookId: string, chapterNumber?: number): Promise<ChapterPipelineResult> {
+  private async _resyncChapterArtifactsLocked(
+    bookId: string,
+    chapterNumber?: number,
+    options: { readonly allowNewHooks?: boolean } = {},
+  ): Promise<ChapterPipelineResult> {
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     const stageLanguage = await this.resolveBookLanguage(book);
@@ -2385,11 +2529,16 @@ export class PipelineRunner {
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const content = await this.readChapterContent(bookDir, targetChapter);
-    const storyDir = join(bookDir, "story");
+    const baselineChapter = targetChapter - 1;
+    const baselineStoryDir = join(bookDir, "story", "snapshots", String(baselineChapter));
     const [oldState, oldHooks] = await Promise.all([
-      readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
-      readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
-    ]);
+      readFile(join(baselineStoryDir, "current_state.md"), "utf-8"),
+      readFile(join(baselineStoryDir, "pending_hooks.md"), "utf-8"),
+    ]).catch((error) => {
+      throw new Error(
+        `Cannot sync chapter ${targetChapter} safely: baseline snapshot ${baselineChapter} is unavailable (${String(error)})`,
+      );
+    });
 
     const reducedControlInput = (this.config.inputGovernanceMode ?? "v2") === "legacy"
       ? undefined
@@ -2406,6 +2555,8 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber: targetChapter,
+      baselineChapter,
+      allowNewHooks: options.allowNewHooks,
       title: targetMeta.title,
       content,
       chapterIntent: reducedControlInput?.plan.intentMarkdown,
@@ -2431,6 +2582,8 @@ export class PipelineRunner {
         book,
         bookDir,
         chapterNumber: targetChapter,
+        baselineChapter,
+        allowNewHooks: options.allowNewHooks,
         title: targetMeta.title,
         content,
         reducedControlInput: reducedControlInput

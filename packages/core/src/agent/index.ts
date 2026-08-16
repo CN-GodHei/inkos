@@ -12,6 +12,10 @@ export {
   createStoryboardCreationTool,
   createInteractiveFilmCreationTool,
   createTranslationCreateTool,
+  createFanficBookTool,
+  createContinuationImportTool,
+  createSpinoffBookTool,
+  createImitationBookTool,
   createResearchWebTool,
   createIngestMaterialTool,
   createManageBookReferenceTool,
@@ -31,7 +35,10 @@ export {
   type AgentSessionConfig,
   type AgentSessionResult,
 } from "./agent-session.js";
-export { createBookContextTransform } from "./context-transform.js";
+export {
+  createBookContextTransform,
+  createInteractiveFilmContextTransform,
+} from "./context-transform.js";
 export { createUseSkillTool, type CreateUseSkillToolOptions } from "./skill-tool.js";
 export {
   createSetWorldAnchorTool,

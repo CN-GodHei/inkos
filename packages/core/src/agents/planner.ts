@@ -26,13 +26,12 @@ import {
   extractCollaboratorRows,
   extractOpponentRows,
   extractProtagonistRow,
-  extractRelevantThreads,
+  formatRelevantThreads,
   formatRecentSummaries,
   formatRecyclableHooks,
   readBookRules,
   readCharacterMatrix,
   readEmotionalArcs,
-  readPendingHooks,
   readSubplotBoard,
 } from "./planner-context.js";
 import type { StoredHook } from "../state/memory-db.js";
@@ -140,6 +139,7 @@ export class PlannerAgent extends BaseAgent {
       previousEndingExcerpt: seedMaterials.previousEndingExcerpt,
       brief: seedMaterials.brief,
       chapterContext: input.externalContext,
+      relevantHooks: memorySelection.hooks,
       recyclableHooks: memorySelection.recyclableHooks,
       // Phase hotfix 4: thread book language through so the planner uses
       // English prompts (system + user template + golden opening guidance)
@@ -187,14 +187,14 @@ export class PlannerAgent extends BaseAgent {
     readonly previousEndingExcerpt?: string;
     readonly brief?: string;
     readonly chapterContext?: string;
+    readonly relevantHooks?: ReadonlyArray<StoredHook>;
     readonly recyclableHooks?: ReadonlyArray<StoredHook>;
     readonly language?: "zh" | "en";
   }): Promise<ChapterMemo> {
-    const [characterMatrix, subplotBoard, emotionalArcs, pendingHooks, bookRulesRaw] = await Promise.all([
+    const [characterMatrix, subplotBoard, emotionalArcs, bookRulesRaw] = await Promise.all([
       readCharacterMatrix(input.storyDir),
       readSubplotBoard(input.storyDir),
       readEmotionalArcs(input.storyDir),
-      readPendingHooks(input.storyDir),
       readBookRules(input.storyDir),
     ]);
 
@@ -222,7 +222,7 @@ export class PlannerAgent extends BaseAgent {
       protagonistMatrixRow: extractProtagonistRow(characterMatrix),
       opponentRows: extractOpponentRows(characterMatrix, 3),
       collaboratorRows: extractCollaboratorRows(characterMatrix, 3),
-      relevantThreads: extractRelevantThreads(pendingHooks, subplotBoard),
+      relevantThreads: formatRelevantThreads(input.relevantHooks ?? [], subplotBoard, language),
       recyclableHooks: formatRecyclableHooks(
         input.recyclableHooks ?? [],
         input.chapterNumber,

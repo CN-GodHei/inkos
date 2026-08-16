@@ -12,6 +12,7 @@ import {
   filterActiveHooks,
   isFuturePlannedHook,
   isHookWithinChapterWindow,
+  normalizeStoredHookStatus,
 } from "./hook-lifecycle.js";
 import {
   parseChapterSummariesMarkdown,
@@ -131,6 +132,10 @@ export async function retrieveMemorySelection(params: {
   // promoted/core/dependency metadata, which is load-bearing for hook debt.
   const hooks = structuredHooks?.hooks ?? parsePendingHooksMarkdown(hooksMarkdown);
   const activeHooks = filterActiveHooks(hooks);
+  // Dormant architect seeds are not active debt, but they remain searchable
+  // canon. A chapter can explicitly activate one of them; excluding deferred
+  // rows from retrieval makes the planner invent a duplicate hook instead.
+  const searchableHooks = hooks.filter((hook) => normalizeStoredHookStatus(hook.status) !== "resolved");
 
   const summaries = structuredSummaries?.rows ?? parseChapterSummariesMarkdown(
     await readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => ""),
@@ -150,7 +155,7 @@ export async function retrieveMemorySelection(params: {
         STORY_MEMORY_SCOPE,
         buildMemorySearchDocuments({
           summaries,
-          hooks: effectiveActiveHooks,
+          hooks: searchableHooks,
           facts,
           volumeSummaries: parsedVolumeSummaries,
         }),
@@ -171,7 +176,12 @@ export async function retrieveMemorySelection(params: {
 
       return {
         summaries: selectRelevantSummaries(summaries, params.chapterNumber, rankScores),
-        hooks: selectRelevantHooks(effectiveActiveHooks, rankScores, params.chapterNumber),
+        hooks: selectRelevantHooks(
+          searchableHooks,
+          effectiveActiveHooks,
+          rankScores,
+          params.chapterNumber,
+        ),
         activeHooks: effectiveActiveHooks,
         recyclableHooks: computeRecyclableHooks(effectiveActiveHooks, params.chapterNumber),
         facts: selectRelevantFacts(facts, rankScores),
@@ -412,9 +422,11 @@ function selectRelevantSummaries(
 
 function selectRelevantHooks(
   hooks: ReadonlyArray<StoredHook>,
+  activeHooks: ReadonlyArray<StoredHook>,
   rankScores: ReadonlyMap<string, number>,
   chapterNumber: number,
 ): StoredHook[] {
+  const activeHookIds = new Set(activeHooks.map((hook) => hook.hookId));
   const ranked = hooks
     .map((hook) => {
       const retrievalScore = rankScores.get(hookDocumentId(hook.hookId)) ?? 0;
@@ -424,11 +436,12 @@ function selectRelevantHooks(
         retrieved: retrievalScore > 0,
       };
     })
-    .filter((entry) => entry.retrieved || isUnresolvedHook(entry.hook.status));
+    .filter((entry) => entry.retrieved || activeHookIds.has(entry.hook.hookId));
 
   const primary = ranked
     .filter((entry) =>
-      entry.retrieved || isHookWithinChapterWindow(entry.hook, chapterNumber, 5),
+      entry.retrieved
+      || (activeHookIds.has(entry.hook.hookId) && isHookWithinChapterWindow(entry.hook, chapterNumber, 5)),
     )
     .sort((left, right) => right.score - left.score || right.hook.lastAdvancedChapter - left.hook.lastAdvancedChapter)
     .slice(0, 6);
@@ -437,6 +450,7 @@ function selectRelevantHooks(
   const stale = ranked
     .filter((entry) =>
       !selectedIds.has(entry.hook.hookId)
+      && activeHookIds.has(entry.hook.hookId)
       && !isFuturePlannedHook(entry.hook, chapterNumber)
       && isUnresolvedHook(entry.hook.status),
     )

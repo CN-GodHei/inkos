@@ -1,4 +1,5 @@
 import { Agent } from "@mariozechner/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import {
   createAssistantMessageEventStream,
   type Api,
@@ -9,6 +10,8 @@ import {
   type Provider,
   type SimpleStreamOptions,
 } from "@mariozechner/pi-ai";
+import type { Static, TSchema } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import {
   chatCompletion,
   type LLMClient,
@@ -16,6 +19,8 @@ import {
   type LLMResponse,
   type OnStreamProgress,
 } from "../llm/provider.js";
+import { guardedPiStream } from "./pi-stream.js";
+import { isLlmStubEnabled, stubChatCompletion } from "./llm-stub.js";
 
 export interface WorkerAgentOptions {
   readonly temperature?: number;
@@ -24,6 +29,13 @@ export interface WorkerAgentOptions {
   readonly onStreamProgress?: OnStreamProgress;
   readonly onTextDelta?: (text: string) => void;
   readonly signal?: AbortSignal;
+}
+
+export interface WorkerResultTool<TParameters extends TSchema> {
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: TParameters;
 }
 
 const EMPTY_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -89,6 +101,16 @@ function assistantMessage(
     ...(errorMessage ? { errorMessage } : {}),
     timestamp: Date.now(),
   };
+}
+
+function localStopStream(model: Model<Api>) {
+  const stream = createAssistantMessageEventStream();
+  const message = assistantMessage(model, "", undefined, "stop");
+  queueMicrotask(() => {
+    stream.push({ type: "done", reason: "stop", message });
+    stream.end(message);
+  });
+  return stream;
 }
 
 function textFromContent(content: Message["content"]): string {
@@ -269,6 +291,79 @@ export async function runWorkerAgent(
         totalTokens: final.usage.totalTokens,
       },
     };
+  } finally {
+    options.signal?.removeEventListener("abort", abortAgent);
+  }
+}
+
+/**
+ * Run a worker whose result is host-consumed state rather than prose.
+ * The model must submit validated arguments through one Pi tool; the host owns
+ * the tool result and never scrapes JSON out of assistant text.
+ */
+export async function runWorkerAgentTool<TParameters extends TSchema>(
+  client: LLMClient,
+  modelId: string,
+  messages: ReadonlyArray<LLMMessage>,
+  resultTool: WorkerResultTool<TParameters>,
+  options: WorkerAgentOptions = {},
+): Promise<Static<TParameters>> {
+  options.signal?.throwIfAborted();
+  if (isLlmStubEnabled()) {
+    const response = stubChatCompletion(messages, modelId);
+    return Value.Parse(resultTool.parameters, JSON.parse(response.content)) as Static<TParameters>;
+  }
+  if (!client._piModel) {
+    throw new Error("Structured worker tools require a resolved Pi model");
+  }
+  const model = workerModel(client, modelId, options.maxTokens);
+  const systemPrompt = [
+    ...messages.filter((message) => message.role === "system").map((message) => message.content),
+    `Finish by calling ${resultTool.name} exactly once. Do not print the result as prose or JSON.`,
+  ].join("\n\n");
+  const promptMessages = toAgentMessages(messages, model);
+  if (promptMessages.length === 0) {
+    throw new Error("Structured Worker Agent requires at least one non-system message");
+  }
+
+  let submitted: Static<TParameters> | undefined;
+  const tool: AgentTool<TParameters, Static<TParameters>> = {
+    ...resultTool,
+    execute: async (_toolCallId, params): Promise<AgentToolResult<Static<TParameters>>> => {
+      submitted = params;
+      return {
+        content: [{ type: "text", text: "Structured result accepted by the host." }],
+        details: params,
+      };
+    },
+  };
+  const agent = new Agent({
+    initialState: { model, systemPrompt, tools: [tool], messages: [] },
+    toolExecution: "sequential",
+    streamFn: (streamModel, context, streamOptions) => submitted
+      ? localStopStream(streamModel)
+      : guardedPiStream(streamModel, context, {
+          ...streamOptions,
+          ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
+          ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
+          signal: combineSignals(streamOptions?.signal, options.signal),
+        }),
+    getApiKey: () => client._apiKey,
+  });
+  const abortAgent = () => agent.abort();
+  options.signal?.addEventListener("abort", abortAgent, { once: true });
+
+  try {
+    await agent.prompt(promptMessages);
+    options.signal?.throwIfAborted();
+    if (!submitted) {
+      await agent.prompt(`You did not call ${resultTool.name}. Call it now with the complete result.`);
+      options.signal?.throwIfAborted();
+    }
+    if (!submitted) {
+      throw new Error(`Worker Agent completed without calling ${resultTool.name}`);
+    }
+    return submitted;
   } finally {
     options.signal?.removeEventListener("abort", abortAgent);
   }

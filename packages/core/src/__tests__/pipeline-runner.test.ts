@@ -9,13 +9,16 @@ import { StateManager } from "../state/manager.js";
 import { ArchitectAgent } from "../agents/architect.js";
 import { PlannerAgent } from "../agents/planner.js";
 import * as ComposerModule from "../agents/composer.js";
-import { WriterAgent, type WriteChapterOutput } from "../agents/writer.js";
+import { WriterAgent, type SettleChapterStateInput, type WriteChapterOutput } from "../agents/writer.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { ContinuityAuditor, type AuditIssue, type AuditResult } from "../agents/continuity.js";
 import { ReviserAgent, type ReviseOutput } from "../agents/reviser.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { StateValidatorAgent } from "../agents/state-validator.js";
-import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
+import {
+  FoundationReviewerAgent,
+  FoundationReviewParseError,
+} from "../agents/foundation-reviewer.js";
 import { PolisherAgent } from "../agents/polisher.js";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
@@ -120,9 +123,6 @@ function createReviseOutput(overrides: Partial<ReviseOutput> = {}): ReviseOutput
     revisedContent: "Revised chapter body.",
     wordCount: "Revised chapter body.".length,
     fixedIssues: ["fixed"],
-    updatedState: "revised state",
-    updatedLedger: "revised ledger",
-    updatedHooks: "revised hooks",
     tokenUsage: ZERO_USAGE,
     ...overrides,
   };
@@ -141,6 +141,84 @@ function createAnalyzedOutput(overrides: Partial<WriteChapterOutput> = {}): Writ
     updatedCharacterMatrix: "analyzed matrix",
     ...overrides,
   });
+}
+
+function createSettledRevisionOutput(
+  input: SettleChapterStateInput,
+  overrides: Partial<WriteChapterOutput> = {},
+): WriteChapterOutput {
+  const updatedState = createStateCard({
+    chapter: input.chapterNumber,
+    location: "Revision test location",
+    protagonistState: "Revision state settled from the new body.",
+    goal: "Continue the revised chapter direction.",
+    conflict: "Revision state remains internally consistent.",
+  });
+  const summaryRow = {
+    chapter: input.chapterNumber,
+    title: input.title,
+    characters: "Test protagonist",
+    events: "Revised chapter settled",
+    stateChanges: "State updated",
+    hookActivity: "No hook changes",
+    mood: "tense",
+    chapterType: "mainline",
+  };
+  return createWriterOutput({
+    chapterNumber: input.chapterNumber,
+    title: input.title,
+    content: input.content,
+    wordCount: input.content.length,
+    runtimeStateDelta: {
+      chapter: input.chapterNumber,
+      hookOps: { upsert: [], mention: [], resolve: [], defer: [] },
+      newHookCandidates: [],
+      chapterSummary: summaryRow,
+      subplotOps: [],
+      emotionalArcOps: [],
+      characterMatrixOps: [],
+      notes: [],
+    },
+    runtimeStateSnapshot: {
+      manifest: {
+        schemaVersion: 2,
+        language: input.book.language ?? "zh",
+        lastAppliedChapter: input.chapterNumber,
+        projectionVersion: 1,
+        migrationWarnings: [],
+      },
+      currentState: {
+        chapter: input.chapterNumber,
+        facts: [],
+      },
+      hooks: { hooks: [] },
+      chapterSummaries: { rows: [summaryRow] },
+    },
+    updatedState,
+    updatedHooks: "# Pending Hooks\n",
+    chapterSummary: `| ${input.chapterNumber} | ${input.title} | Test protagonist | Revised chapter settled | State updated | No hook changes | tense | mainline |`,
+    updatedChapterSummaries: `# Chapter Summaries\n\n| Chapter | Title | Characters | Key Events | State Changes | Hook Activity | Mood | Chapter Type |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| ${input.chapterNumber} | ${input.title} | Test protagonist | Revised chapter settled | State updated | No hook changes | tense | mainline |\n`,
+    ...overrides,
+  });
+}
+
+async function snapshotRevisionBaseline(
+  state: StateManager,
+  bookId: string,
+  chapterNumber: number,
+): Promise<void> {
+  const storyDir = join(state.bookDir(bookId), "story");
+  await readFile(join(storyDir, "current_state.md"), "utf-8").catch(() =>
+    writeFile(join(storyDir, "current_state.md"), createStateCard({
+      chapter: chapterNumber,
+      location: "Baseline location",
+      protagonistState: "Baseline protagonist state.",
+      goal: "Baseline goal.",
+      conflict: "Baseline conflict.",
+    }), "utf-8"));
+  await readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() =>
+    writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"));
+  await state.snapshotState(bookId, chapterNumber);
 }
 
 function createStateCard(params: {
@@ -303,6 +381,9 @@ describe("PipelineRunner", () => {
       warnings: [],
       passed: true,
     });
+    vi.spyOn(WriterAgent.prototype, "settleChapterState").mockImplementation(
+      async (input) => createSettledRevisionOutput(input),
+    );
     // Default reviser mock: return input content unchanged so the review cycle's
     // repair loop exits immediately when triggered by length-out-of-range content.
     // Tests that need specific revision behavior override this mock explicitly.
@@ -582,6 +663,55 @@ describe("PipelineRunner", () => {
       expect(generate.mock.calls[1]?.[0]).toContain("核心冲突");
       expect(generate.mock.calls[1]?.[0]).toContain("核心冲突不够集中");
       expect(generate.mock.calls[1]?.[0]).toContain("开篇节奏");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the current foundation when review formatting cannot be parsed", async () => {
+    const { root, runner, bookId } = await createRunnerFixture();
+    const reviewer = new FoundationReviewerAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+      } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId,
+    });
+    const foundation = {
+      storyBible: "# Story Bible",
+      volumeOutline: "# Volume Outline",
+      bookRules: "# Book Rules",
+      currentState: "# Current State",
+      pendingHooks: "# Pending Hooks",
+    };
+    const generate = vi.fn(async () => foundation);
+    const reviewMock = vi.mocked(FoundationReviewerAgent.prototype.review);
+    reviewMock.mockReset();
+    reviewMock.mockRejectedValue(new FoundationReviewParseError([2, 3, 4, 5]));
+
+    try {
+      const result = await (runner as unknown as {
+        generateAndReviewFoundation: (params: {
+          readonly generate: () => Promise<typeof foundation>;
+          readonly reviewer: FoundationReviewerAgent;
+          readonly mode: "original";
+          readonly language: "zh";
+          readonly stageLanguage: "zh";
+        }) => Promise<typeof foundation>;
+      }).generateAndReviewFoundation({
+        generate,
+        reviewer,
+        mode: "original",
+        language: "zh",
+        stageLanguage: "zh",
+      });
+
+      expect(result).toBe(foundation);
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(reviewMock).toHaveBeenCalledTimes(1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2788,11 +2918,15 @@ describe("PipelineRunner", () => {
     const now = "2026-03-19T00:00:00.000Z";
     const bookDir = state.bookDir(bookId);
     const storyDir = join(bookDir, "story");
+    const baselineDir = join(storyDir, "snapshots", "0");
+    await mkdir(baselineDir, { recursive: true });
 
     await Promise.all([
       writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
       writeFile(join(storyDir, "particle_ledger.md"), "stable ledger", "utf-8"),
+      writeFile(join(baselineDir, "current_state.md"), "baseline state", "utf-8"),
+      writeFile(join(baselineDir, "pending_hooks.md"), "baseline hooks", "utf-8"),
       writeFile(
         join(bookDir, "chapters", "0001_Broken_Persistence.md"),
         "# 第1章 Broken Persistence\n\nHealthy chapter body with the copper token in his coat.",
@@ -2850,6 +2984,7 @@ describe("PipelineRunner", () => {
     expect(result.chapterNumber).toBe(1);
     expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({
       allowReapply: true,
+      baselineChapter: 0,
     }));
     await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe("fixed state");
     await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe("fixed hooks");
@@ -2868,6 +3003,8 @@ describe("PipelineRunner", () => {
     const now = "2026-03-19T00:00:00.000Z";
     const bookDir = state.bookDir(bookId);
     const storyDir = join(bookDir, "story");
+    const baselineDir = join(storyDir, "snapshots", "0");
+    await mkdir(baselineDir, { recursive: true });
 
     await Promise.all([
       writeFile(join(storyDir, "current_focus.md"), "# 当前聚焦\n\n## 当前重点\n\n商会路线优先。\n", "utf-8"),
@@ -2884,6 +3021,8 @@ describe("PipelineRunner", () => {
         "| 1 | 夜灯 | 林越 | 林越继续追查师债 | 追查意图更强 | 师债推进 | 压抑 | 主线推进 |",
         "",
       ].join("\n"), "utf-8"),
+      writeFile(join(baselineDir, "current_state.md"), "baseline state", "utf-8"),
+      writeFile(join(baselineDir, "pending_hooks.md"), "baseline hooks", "utf-8"),
       writeFile(
         join(bookDir, "chapters", "0001_夜灯.md"),
         "# 第1章 夜灯\n\n林越推门进去，先停在门槛外听了一息，再去看柜台后那盏没关的灯。",
@@ -2936,6 +3075,7 @@ describe("PipelineRunner", () => {
     expect(result.chapterNumber).toBe(1);
     expect(settleSpy).toHaveBeenCalledWith(expect.objectContaining({
       allowReapply: true,
+      baselineChapter: 0,
       chapterIntent: expect.stringContaining("把注意力收回师债主线"),
     }));
     await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe("synced state");
@@ -3951,6 +4091,7 @@ describe("PipelineRunner", () => {
       auditIssues: [],
       lengthWarnings: [],
     }]);
+    await snapshotRevisionBaseline(state, bookId, 0);
     await state.snapshotState(bookId, 1);
 
     vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
@@ -3972,12 +4113,33 @@ describe("PipelineRunner", () => {
       createReviseOutput({
         revisedContent: "Revised body.",
         wordCount: "Revised body.".length,
-        updatedState: revisedState,
-        updatedHooks: "# Pending Hooks\n",
       }),
+    );
+    vi.spyOn(WriterAgent.prototype, "settleChapterState").mockImplementation(
+      async (input) => {
+        const output = createSettledRevisionOutput(input, { updatedState: revisedState });
+        return {
+          ...output,
+          runtimeStateSnapshot: {
+            ...output.runtimeStateSnapshot!,
+            currentState: {
+              chapter: 1,
+              facts: [{
+                subject: "protagonist",
+                predicate: "Current Conflict",
+                object: "The oath token is public now, forcing the confrontation.",
+                validFromChapter: 1,
+                validUntilChapter: null,
+                sourceChapter: 1,
+              }],
+            },
+          },
+        };
+      },
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       await runner.reviseDraft(bookId, 1);
 
       const memoryDb = new MemoryDB(state.bookDir(bookId));
@@ -4237,14 +4399,6 @@ describe("PipelineRunner", () => {
       createReviseOutput({
         revisedContent: revisedBody,
         wordCount: revisedBody.length,
-        updatedState: createStateCard({
-          chapter: 1,
-          location: "Ashen ferry crossing",
-          protagonistState: "Lin Yue still hides the oath token.",
-          goal: "Find the vanished mentor.",
-          conflict: "He steps into the empty room.",
-        }),
-        updatedHooks: "# Pending Hooks\n",
       }),
     );
     vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
@@ -4425,18 +4579,11 @@ describe("PipelineRunner", () => {
       createReviseOutput({
         revisedContent: "Spot-fixed body.",
         wordCount: "Spot-fixed body.".length,
-        updatedState: createStateCard({
-          chapter: 1,
-          location: "Ashen ferry crossing",
-          protagonistState: "Lin Yue still hides the oath token.",
-          goal: "Find the vanished mentor.",
-          conflict: "The mentor debt is repaired.",
-        }),
-        updatedHooks: "# Pending Hooks\n",
       }),
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       await runner.reviseDraft(bookId, 1);
 
       expect(reviseChapter).toHaveBeenCalledTimes(1);
@@ -4507,18 +4654,11 @@ describe("PipelineRunner", () => {
         revisedContent: "林越推门进去，先停在门槛外听了一息，再去看柜台后那盏没关的灯。",
         wordCount: "林越推门进去，先停在门槛外听了一息，再去看柜台后那盏没关的灯。".length,
         fixedIssues: ["- 收紧了主线焦点。"],
-        updatedState: createStateCard({
-          chapter: 1,
-          location: "旧港便利店",
-          protagonistState: "林越把注意力重新拉回师债。",
-          goal: "继续追查师债。",
-          conflict: "商会路线暂时退居背景。",
-        }),
-        updatedHooks: "# 伏笔池\n\n- 师债线索仍未回收。\n",
       }),
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       await runner.reviseDraft(bookId, 1);
 
       expect(auditChapter.mock.calls[0]?.[4]).toMatchObject({
@@ -4618,6 +4758,7 @@ describe("PipelineRunner", () => {
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       await runner.reviseDraft(bookId, 1);
 
       expect(reviseChapter.mock.calls[0]?.[6]).toMatchObject({
@@ -4696,6 +4837,7 @@ describe("PipelineRunner", () => {
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       const result = await runner.reviseDraft(bookId, 1);
       const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
       const savedIndex = await state.loadChapterIndex(bookId);
@@ -4772,18 +4914,11 @@ describe("PipelineRunner", () => {
         revisedContent: revisedBody,
         wordCount: revisedBody.length,
         fixedIssues: ["- 收紧了结尾节奏。"],
-        updatedState: createStateCard({
-          chapter: 1,
-          location: "Ashen ferry crossing",
-          protagonistState: "Lin Yue still hides the oath token.",
-          goal: "Find the vanished mentor.",
-          conflict: "The mentor debt sharpens into a direct threat.",
-        }),
-        updatedHooks: "# Pending Hooks\n",
       }),
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       const result = await runner.reviseDraft(bookId, 1);
       const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
       const savedIndex = await state.loadChapterIndex(bookId);
@@ -4835,16 +4970,10 @@ describe("PipelineRunner", () => {
         revisedContent: revisedBody,
         wordCount: revisedBody.length,
         fixedIssues: ["- 调整了开场镜头。"],
-        updatedState: createStateCard({
-          chapter: 1,
-          location: "Ashen ferry crossing",
-          protagonistState: "Lin Yue still hides the oath token.",
-          goal: "Find the vanished mentor.",
-          conflict: "The mentor debt sharpens into a direct threat.",
-        }),
-        updatedHooks: "# Pending Hooks\n",
       }),
     );
+
+    await snapshotRevisionBaseline(fixture.state, fixture.bookId, 0);
 
     return { ...fixture, chaptersDir, revisedBody };
   }
@@ -4855,6 +4984,42 @@ describe("PipelineRunner", () => {
     description: "结尾解释略多。",
     suggestion: "压缩一行解释。",
   };
+
+  it("keeps chapter and truth files unchanged when revised-body settlement cannot validate", async () => {
+    const { root, runner, state, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("always");
+    const storyDir = join(state.bookDir(bookId), "story");
+    const originalChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+    const originalState = await readFile(join(storyDir, "current_state.md"), "utf-8");
+    const originalHooks = await readFile(join(storyDir, "pending_hooks.md"), "utf-8");
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValueOnce(
+      createAuditResult({ passed: false, issues: [CRITICAL_ISSUE], summary: "needs revision" }),
+    );
+    vi.spyOn(StateValidatorAgent.prototype, "validate").mockResolvedValue({
+      passed: false,
+      repairRequired: true,
+      warnings: [{
+        category: "state-conflict",
+        description: "The derived hook board contradicts the revised body.",
+      }],
+    });
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "rework", "Rewrite the chapter and sync state.");
+
+      expect(result.applied).toBe(false);
+      expect(result.skippedReason).toContain("state settlement did not validate");
+      expect(result.auditIssues).toEqual([
+        expect.objectContaining({ category: "state-validation" }),
+      ]);
+      await expect(readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8")).resolves.toBe(originalChapter);
+      await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe(originalState);
+      await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toBe(originalHooks);
+      expect(originalChapter).not.toContain(revisedBody);
+      await expect(listChapterVersions(state.bookDir(bookId), 1)).resolves.toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, SLOW_PIPELINE_TEST_TIMEOUT_MS);
 
   it("applies a no-improvement manual revision when revisionGate is lenient", async () => {
     const { root, runner, bookId, chaptersDir, revisedBody } = await createRevisionGateFixture("lenient");
@@ -5103,18 +5268,11 @@ describe("PipelineRunner", () => {
         revisedContent: revisedBody,
         wordCount: countChapterLength(revisedBody, "en_words"),
         fixedIssues: ["- Synced the annexe beat and tightened the ending."],
-        updatedState: createStateCard({
-          chapter: 2,
-          location: "East annexe corridor",
-          protagonistState: "Taryn is pressed against the annexe door with the true key in hand.",
-          goal: "Open the annexe before the cart clears the court.",
-          conflict: "A forged key and rival searchers have turned lawful access into a trap.",
-        }),
-        updatedHooks: "# Pending Hooks\n",
       }),
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 1);
       const result = await runner.reviseDraft(bookId, 2);
       const savedIndex = await state.loadChapterIndex(bookId);
 
@@ -5319,18 +5477,11 @@ describe("PipelineRunner", () => {
         revisedContent: revisedBody,
         wordCount: countChapterLength(revisedBody, "en_words"),
         fixedIssues: ["- Tightened the berth discovery beat."],
-        updatedState: createStateCard({
-          chapter: 1,
-          location: "Dock Nine",
-          protagonistState: "Tarin still carries the sealed packet.",
-          goal: "Find Captain Voss.",
-          conflict: "The berth is wrong and the crew is missing.",
-        }),
-        updatedHooks: "# Pending Hooks\n",
       }),
     );
 
     try {
+      await snapshotRevisionBaseline(state, bookId, 0);
       await runner.reviseDraft(bookId, 1, "polish");
 
       expect(reviseChapter).toHaveBeenCalledTimes(1);

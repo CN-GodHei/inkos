@@ -51,6 +51,7 @@ export interface ShortFictionRunRuntimes {
 
 export interface ShortFictionRunOptions {
   readonly projectRoot: string;
+  readonly title?: string;
   readonly direction: string;
   readonly runtimes: ShortFictionRunRuntimes;
   readonly reference?: ShortFictionReference;
@@ -114,7 +115,11 @@ export async function runShortFictionProduction(
 ): Promise<ShortFictionRunResult> {
   const root = options.projectRoot;
   const outDir = normalizeOutputDir(options.outDir ?? "shorts");
-  const providedStoryId = options.storyId ? safeSegment(options.storyId) : undefined;
+  const providedStoryId = options.storyId
+    ? safeSegment(options.storyId)
+    : options.title?.trim()
+      ? safeSegment(slugify(options.title))
+      : undefined;
 
   // A stable storyId lets a re-run resume from disk instead of redoing finished
   // work — a transient failure in a late stage used to throw the whole short
@@ -179,6 +184,7 @@ async function produceShort(
     : undefined;
 
   let outlineMarkdown: string;
+  let outlineRevisionWarning: string | undefined;
   let storyId: string;
   let baseDir: string;
   if (providedStoryId && resumedOutline?.trim()) {
@@ -213,17 +219,42 @@ async function produceShort(
 
     options.onProgress?.("Revising outline once...");
     const outlineReviser = new ShortFictionOutlineReviserAgent(options.runtimes.planner);
-    const outlineV2 = await outlineReviser.reviseOutline({
-      direction: options.direction,
-      outline: outlineV1,
-      review: outlineReview,
-      reference: options.reference,
-      chapterCount,
-      charsPerChapter,
-      language,
-    });
-    await writeText(root, join(baseDir, "outline", "v002.md"), outlineV2.rawContent);
-    outlineMarkdown = outlineV2.rawContent;
+    try {
+      const outlineV2 = await outlineReviser.reviseOutline({
+        direction: options.direction,
+        outline: outlineV1,
+        review: outlineReview,
+        reference: options.reference,
+        chapterCount,
+        charsPerChapter,
+        language,
+      });
+      await writeText(root, join(baseDir, "outline", "v002.md"), outlineV2.rawContent);
+      outlineMarkdown = outlineV2.rawContent;
+    } catch (error) {
+      outlineRevisionWarning = error instanceof Error ? error.message : String(error);
+      outlineMarkdown = outlineV1.rawContent;
+      await writeText(root, join(baseDir, "outline", "v002.md"), outlineMarkdown);
+      await writeText(root, join(baseDir, "reviews", "outline-v002-warning.md"), language === "en"
+        ? [
+            "# Outline revision not adopted",
+            "",
+            "The complete first outline remains authoritative because the optional revision did not finish cleanly.",
+            "",
+            "## Reason",
+            "",
+            outlineRevisionWarning,
+          ].join("\n")
+        : [
+            "# 第二版大纲未采用",
+            "",
+            "可用的第一版大纲继续生效；可选修订没有完整结束，系统没有用残缺输出覆盖它。",
+            "",
+            "## 原因",
+            "",
+            outlineRevisionWarning,
+          ].join("\n"));
+    }
   }
 
   let finalDraft: ShortFictionBatchDraft;
@@ -349,10 +380,14 @@ async function produceShort(
         return { coverError: String(error) };
       });
 
-  if (revisionWarning) {
+  const completionWarnings = [
+    outlineRevisionWarning ? `outline revision skipped: ${outlineRevisionWarning}` : "",
+    revisionWarning ? `draft revision skipped: ${revisionWarning}` : "",
+  ].filter(Boolean);
+  if (completionWarnings.length > 0) {
     await writeShortRunStatus(root, baseDir, {
       status: "complete",
-      warning: `revision skipped: ${revisionWarning}`,
+      warning: completionWarnings.join("; "),
     }).catch(() => undefined);
   }
 

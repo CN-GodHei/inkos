@@ -101,6 +101,43 @@ describe("retrieveMemorySelection", () => {
     expect(result.hooks.map((hook) => hook.hookId)).not.toContain("H-seed");
   });
 
+  it("retrieves a relevant deferred seed without promoting it to active debt", async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-memory-retrieval-deferred-seed-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# 章节摘要\n", "utf-8"),
+      writeFile(
+        join(storyDir, "pending_hooks.md"),
+        [
+          "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | depends_on | 回收位置 | 核心 | 半衰期 | 升级 | 备注 |",
+          "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+          "| H012 | 0 | 单元案（座钟伪证） | deferred | 0 | 第一卷回收 | 立即 | 无 | 第一卷 | 否 | 10 | 否 | 孙玉珍家座钟被回拨，关联高永强不在场证明 |",
+          "| H099 | 0 | 远期人物线 | deferred | 0 | 第五卷回收 | 慢烧 | 无 | 第五卷 | 否 | 30 | 否 | 远期亲属关系秘密 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      ),
+    ]);
+
+    const result = await retrieveMemorySelection({
+      bookDir,
+      chapterNumber: 1,
+      goal: "写孙玉珍抱座钟进店，发现座钟被回拨并牵出不在场证明。",
+    });
+
+    expect(result.activeHooks).toEqual([]);
+    expect(result.recyclableHooks).toEqual([]);
+    expect(result.hooks.map((hook) => hook.hookId)).toContain("H012");
+    expect(result.hooks.map((hook) => hook.hookId)).not.toContain("H099");
+    expect(result.retrievalTrace.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "hook:H012" }),
+    ]));
+  });
+
   it("prefers the mentor-debt recap chapter over nearby guild-noise chapters in English retrieval", async () => {
     root = await mkdtemp(join(tmpdir(), "inkos-memory-retrieval-en-test-"));
     const bookDir = join(root, "book");

@@ -757,7 +757,7 @@ describe("WriterAgent", () => {
     }
   });
 
-  it("returns the arbiter-resolved delta instead of raw new-hook candidates", async () => {
+  it("preserves the settler's explicit existing hook identity", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-arbiter-test-"));
     const bookDir = join(root, "book");
     const storyDir = join(bookDir, "story");
@@ -840,18 +840,22 @@ describe("WriterAgent", () => {
           JSON.stringify({
             chapter: 3,
             hookOps: {
-              upsert: [],
+              upsert: [
+                {
+                  hookId: "anonymous-source-scope",
+                  startChapter: 1,
+                  type: "source-risk",
+                  status: "progressing",
+                  lastAdvancedChapter: 3,
+                  expectedPayoff: "Reveal how much the anonymous source already knew about the route and address.",
+                  notes: "This chapter adds the address angle to the anonymous source question.",
+                },
+              ],
               mention: [],
               resolve: [],
               defer: [],
             },
-            newHookCandidates: [
-              {
-                type: "source-risk",
-                expectedPayoff: "Reveal how much the anonymous source already knew about the route and address.",
-                notes: "This chapter adds the address angle to the anonymous source question.",
-              },
-            ],
+            newHookCandidates: [],
             chapterSummary: {
               chapter: 3,
               title: "Address Leak",

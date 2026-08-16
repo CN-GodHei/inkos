@@ -225,8 +225,9 @@ export interface MessageActions {
   sendMessage: (sessionId: string, text: string, options?: SendMessageOptions) => Promise<void>;
   // 用 lastFailedSend 记录的原样参数重发上一条失败的消息；无记录或聊天轮流式中时不做任何事。
   retryLastSend: (sessionId: string) => Promise<void>;
-  // A stop aborts the Pi turn and its complete serial production workflow.
-  abortSession: (sessionId: string) => Promise<void>;
+  // User stop aborts the complete workflow; navigation uses chat scope so a
+  // background production task can keep running after its Pi turn is cancelled.
+  abortSession: (sessionId: string, scope?: "all" | "chat") => Promise<void>;
   setSelectedModel: (model: string, service: string) => void;
 }
 

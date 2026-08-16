@@ -122,6 +122,21 @@ describe("script and storyboard creation helpers", () => {
     ].join("\n"));
   });
 
+  it("extracts inline-code Prompt lines emitted by storyboard models", () => {
+    const prompts = extractStoryboardImagePrompts([
+      "# 风眼旧频率",
+      "",
+      "## 分镜与图像提示词",
+      "`Prompt: 写实台风海岛，渡船广播室，冷青雨夜，16:9`",
+      "`Prompt: 走私船舱，妹妹敲击暗号，低照度写实电影感`",
+    ].join("\n"));
+
+    expect(prompts).toBe([
+      "1. 写实台风海岛，渡船广播室，冷青雨夜，16:9",
+      "2. 走私船舱，妹妹敲击暗号，低照度写实电影感",
+    ].join("\n"));
+  });
+
   it("extracts prompts from markdown tables with a Prompt column", () => {
     const prompts = extractStoryboardImagePrompts([
       "# 雾桥旅馆",

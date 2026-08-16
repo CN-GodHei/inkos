@@ -91,6 +91,10 @@ import {
   createShortFictionRunTool,
   createStoryboardCreationTool,
   createTranslationCreateTool,
+  createFanficBookTool,
+  createContinuationImportTool,
+  createSpinoffBookTool,
+  createImitationBookTool,
   createSubAgentTool,
   createDraftStructureTool,
   createConnectChoiceTool,
@@ -129,6 +133,7 @@ import {
   type SessionKind,
   type AgentSessionAttachment,
 } from "@actalk/inkos-core";
+import { isConfirmedProductionAction } from "../shared/confirmed-production.js";
 import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isSafeBookId } from "./safety.js";
@@ -213,6 +218,10 @@ const TOOL_LABELS: Record<string, BilingualLabel> = {
   storyboard_create: { zh: "分镜创作", en: "Storyboard creation" },
   interactive_film_create: { zh: "互动影游", en: "Interactive film" },
   translation_create: { zh: "翻译项目", en: "Translation" },
+  fanfic_create: { zh: "同人创作", en: "Fanfiction" },
+  continuation_import: { zh: "导入续写", en: "Continuation import" },
+  spinoff_create: { zh: "番外创作", en: "Side story" },
+  imitation_create: { zh: "仿写创作", en: "Style imitation" },
   generate_cover: { zh: "生成封面", en: "Cover generation" },
   play_edit: { zh: "编辑互动世界", en: "Edit interactive world" },
   play_start: { zh: "启动互动世界", en: "Start interactive world" },
@@ -1156,6 +1165,14 @@ function suppressManualTextForTool(exec: CollectedToolExec): boolean {
     || exec.tool === "interactive_film_create";
 }
 
+function hasSuccessfulToolOwnedResponse(execs: ReadonlyArray<CollectedToolExec>): boolean {
+  return execs.some((exec) =>
+    exec.status === "completed"
+    && !isLikelyFailedToolResult(exec)
+    && suppressManualTextForTool(exec)
+  );
+}
+
 function manualToolAssistantMessage(
   responseText: string,
   exec: CollectedToolExec,
@@ -1189,30 +1206,6 @@ function manualToolAppendOptions(sessionKind: SessionKind, exec: CollectedToolEx
     sessionKind,
     legacyDisplay: { toolExecutions: [exec] },
   };
-}
-
-function isConfirmedProductionAction(args: {
-  readonly actionSource: ActionSource;
-  readonly requestedIntent?: RequestedIntent;
-}): boolean {
-  const confirmedSource = args.actionSource === "button"
-    || args.actionSource === "slash"
-    || (args.actionSource === "quick-action" && args.requestedIntent === "write_next");
-  return confirmedSource
-    && (
-      args.requestedIntent === "write_next"
-    || args.requestedIntent === "create_book"
-    || args.requestedIntent === "short_run"
-    || args.requestedIntent === "script_create"
-    || args.requestedIntent === "storyboard_create"
-    || args.requestedIntent === "interactive_film_create"
-    || args.requestedIntent === "translation_create"
-    || args.requestedIntent === "play_start"
-    || args.requestedIntent === "generate_cover"
-    || args.requestedIntent === "draft_structure"
-    || args.requestedIntent === "connect_choice"
-    || args.requestedIntent === "remove_node"
-    );
 }
 
 function requirePayloadText(value: string | undefined, message: string): string {
@@ -1268,6 +1261,10 @@ async function executeConfirmedProductionAction(args: {
     | ReturnType<typeof createStoryboardCreationTool>
     | ReturnType<typeof createInteractiveFilmCreationTool>
     | ReturnType<typeof createTranslationCreateTool>
+    | ReturnType<typeof createFanficBookTool>
+    | ReturnType<typeof createContinuationImportTool>
+    | ReturnType<typeof createSpinoffBookTool>
+    | ReturnType<typeof createImitationBookTool>
     | ReturnType<typeof createPlayStartTool>
     | ReturnType<typeof createDraftStructureTool>
     | ReturnType<typeof createConnectChoiceTool>
@@ -1415,6 +1412,88 @@ async function executeConfirmedProductionAction(args: {
       targetLanguage,
       ...(payload?.title ? { title: payload.title } : {}),
       ...(payload?.segmentMaxChars ? { segmentMaxChars: payload.segmentMaxChars } : {}),
+    };
+  } else if (args.requestedIntent === "fanfic_init") {
+    const payload = actionPayload?.fanficCreate;
+    const title = requirePayloadText(payload?.title, pick(lang, "确认创建同人缺少书名，请补充后重新确认。", "The fanfiction confirmation is missing a title."));
+    if (!payload?.sourceText?.trim() && !payload?.sourcePath?.trim()) {
+      throw new ApiError(400, "CONFIRMED_ACTION_PAYLOAD_INCOMPLETE", pick(lang, "创建同人需要原作资料或上传文件。", "Fanfiction creation requires source material or an uploaded file."));
+    }
+    tool = createFanficBookTool(args.pipeline, args.root, {
+      defaultSkills: productionSkills("longWriting"),
+    });
+    params = {
+      title,
+      ...(payload.sourceText ? { sourceText: payload.sourceText } : {}),
+      ...(payload.sourcePath ? { sourcePath: payload.sourcePath } : {}),
+      ...(payload.sourceName ? { sourceName: payload.sourceName } : {}),
+      mode: payload.mode ?? "canon",
+      ...(payload.genre ? { genre: payload.genre } : {}),
+      ...(payload.platform ? { platform: payload.platform } : {}),
+      language: payload.language ?? lang,
+      ...(payload.targetChapters ? { targetChapters: payload.targetChapters } : {}),
+      ...(payload.chapterWordCount ? { chapterWordCount: payload.chapterWordCount } : {}),
+    };
+  } else if (args.requestedIntent === "continuation_import") {
+    const payload = actionPayload?.continuationImport;
+    const sourcePath = requirePayloadText(payload?.sourcePath, pick(lang, "导入续写需要上传文件或章节目录。", "Continuation import requires an uploaded file or chapter directory."));
+    const targetBookId = payload?.bookId ?? args.bookId ?? undefined;
+    if (!targetBookId && !payload?.title?.trim()) {
+      throw new ApiError(400, "CONFIRMED_ACTION_PAYLOAD_INCOMPLETE", pick(lang, "导入续写需要选择已有书籍或填写新书名。", "Continuation import requires an existing book or a new title."));
+    }
+    tool = createContinuationImportTool(args.pipeline, args.bookId, args.root, {
+      defaultSkills: productionSkills("longWriting"),
+    });
+    params = {
+      ...(targetBookId ? { bookId: targetBookId } : {}),
+      ...(payload?.title ? { title: payload.title } : {}),
+      sourcePath,
+      ...(payload?.splitPattern ? { splitPattern: payload.splitPattern } : {}),
+      ...(payload?.resumeFrom ? { resumeFrom: payload.resumeFrom } : {}),
+      ...(payload?.genre ? { genre: payload.genre } : {}),
+      ...(payload?.platform ? { platform: payload.platform } : {}),
+      language: payload?.language ?? lang,
+      ...(payload?.targetChapters ? { targetChapters: payload.targetChapters } : {}),
+      ...(payload?.chapterWordCount ? { chapterWordCount: payload.chapterWordCount } : {}),
+    };
+  } else if (args.requestedIntent === "spinoff_create") {
+    const payload = actionPayload?.spinoffCreate;
+    const title = requirePayloadText(payload?.title, pick(lang, "确认创建番外缺少书名。", "The side-story confirmation is missing a title."));
+    const parentBookId = requirePayloadText(payload?.parentBookId ?? args.bookId ?? undefined, pick(lang, "创建番外需要指定正传书籍。", "Side-story creation requires a parent book."));
+    tool = createSpinoffBookTool(args.pipeline, args.root, {
+      defaultSkills: productionSkills("longWriting"),
+    });
+    params = {
+      title,
+      parentBookId,
+      ...(payload?.direction ? { direction: payload.direction } : {}),
+      ...(payload?.genre ? { genre: payload.genre } : {}),
+      ...(payload?.platform ? { platform: payload.platform } : {}),
+      ...(payload?.language ? { language: payload.language } : {}),
+      ...(payload?.targetChapters ? { targetChapters: payload.targetChapters } : {}),
+      ...(payload?.chapterWordCount ? { chapterWordCount: payload.chapterWordCount } : {}),
+    };
+  } else if (args.requestedIntent === "style_imitation") {
+    const payload = actionPayload?.imitationCreate;
+    const title = requirePayloadText(payload?.title, pick(lang, "确认创建仿写缺少书名。", "The imitation confirmation is missing a title."));
+    const storyIdea = requirePayloadText(payload?.storyIdea, pick(lang, "仿写需要一个原创故事方向。", "Style imitation requires an original story idea."));
+    if (!payload?.referenceText?.trim() && !payload?.referencePath?.trim()) {
+      throw new ApiError(400, "CONFIRMED_ACTION_PAYLOAD_INCOMPLETE", pick(lang, "仿写需要参考文本或上传文件。", "Style imitation requires reference text or an uploaded file."));
+    }
+    tool = createImitationBookTool(args.pipeline, args.root, {
+      defaultSkills: productionSkills("longWriting"),
+    });
+    params = {
+      title,
+      storyIdea,
+      ...(payload.referenceText ? { referenceText: payload.referenceText } : {}),
+      ...(payload.referencePath ? { referencePath: payload.referencePath } : {}),
+      ...(payload.sourceName ? { sourceName: payload.sourceName } : {}),
+      ...(payload.genre ? { genre: payload.genre } : {}),
+      ...(payload.platform ? { platform: payload.platform } : {}),
+      language: payload.language ?? lang,
+      ...(payload.targetChapters ? { targetChapters: payload.targetChapters } : {}),
+      ...(payload.chapterWordCount ? { chapterWordCount: payload.chapterWordCount } : {}),
     };
   } else if (args.requestedIntent === "play_start") {
     const payload = actionPayload?.playStart;
@@ -1654,7 +1733,7 @@ function resolveArchitectBookIdFromArgs(args?: Record<string, unknown>): string 
 function resolveCreatedBookIdFromToolExecs(execs: ReadonlyArray<CollectedToolExec>): string | null {
   for (let i = execs.length - 1; i >= 0; i -= 1) {
     const exec = execs[i];
-    if (exec.tool !== "sub_agent" || exec.agent !== "architect" || exec.status !== "completed") continue;
+    if (exec.status !== "completed") continue;
 
     const details = exec.details as { kind?: unknown; bookId?: unknown } | undefined;
     if (details?.kind === "book_created" && typeof details.bookId === "string" && details.bookId.trim()) {
@@ -4529,11 +4608,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/sessions/:sessionId/abort", async (c) => {
     const sessionId = c.req.param("sessionId");
-    const controller = await findRunningTaskController(sessionId);
+    const chatOnly = c.req.query("scope") === "chat";
+    const controller = chatOnly ? undefined : await findRunningTaskController(sessionId);
     controller?.abort();
     const taskAborted = Boolean(controller);
     const aborted = abortAgentSession(root, sessionId) || taskAborted;
-    broadcast("agent:aborted", { sessionId, aborted });
+    broadcast("agent:aborted", { sessionId, aborted, scope: chatOnly ? "chat" : "all" });
     return c.json({ ok: true, aborted });
   });
 
@@ -4771,7 +4851,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         : client;
       // Only a structured action request can start a production task. Free text
       // always stays in the Pi agent loop; the host never infers intent from prose.
-      const confirmedIntent = requestedIntent && isConfirmedProductionAction({ actionSource, requestedIntent })
+      const confirmedIntent = requestedIntent && isConfirmedProductionAction(actionSource, requestedIntent)
         ? requestedIntent
         : undefined;
       // 任务的 execution id 在构建 pipeline 之前生成并传入 executionIdForSSE：
@@ -4873,9 +4953,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           });
 
           let createdBookId: string | null = null;
-          if (exec.tool === "sub_agent" && exec.agent === "architect" && exec.status === "completed") {
+          if (exec.status === "completed") {
             createdBookId = resolveCreatedBookIdFromToolExecs([exec]);
             if (createdBookId) {
+              if (!await completeBookExists(join(root, "books", createdBookId))) {
+                const message = pick(surfaceLanguage, "创作工具返回了建书结果，但磁盘上的书籍工件不完整。", "The creation tool returned a book result, but the on-disk book artifact is incomplete.");
+                bookCreateStatus.set(createdBookId, { status: "error", error: message });
+                broadcast("book:error", { bookId: createdBookId, sessionId: bookSession.sessionId, error: message });
+                throw new ApiError(500, "BOOK_CREATION_INCOMPLETE", message);
+              }
               try {
                 const migratedSession = await migrateBookSession(root, bookSession.sessionId, createdBookId);
                 if (migratedSession) {
@@ -4924,6 +5010,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           if (pendingBookId) {
             bookCreateStatus.set(pendingBookId, { status: "error", error: message });
             broadcast("book:error", { bookId: pendingBookId, sessionId: streamSessionId, error: message });
+          }
+          if (error instanceof ApiError) {
+            broadcast("agent:error", { instruction, activeBookId: agentBookId, sessionId: bookSession.sessionId, sessionKind, error: message });
+            return c.json({
+              error: { code: error.code, message: error.message },
+              response: error.message,
+            }, error.status as 400 | 401 | 403 | 404 | 409 | 413 | 415 | 422 | 429 | 500 | 502 | 503);
           }
           if (error instanceof ConfirmedActionExecutionError) {
             // 指令已在任务开始时写入 transcript，失败时同样只补助手工具消息。
@@ -5179,6 +5272,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
               sessionKind: responseSessionKind,
               ...(createdBookId ?? bookSession.bookId ? { activeBookId: createdBookId ?? bookSession.bookId } : {}),
             },
+            details: { toolExecutions: collectedToolExecs },
           });
         }
 
@@ -5202,7 +5296,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       broadcast("agent:complete", { instruction, activeBookId, sessionId: bookSession.sessionId, sessionKind: responseSessionKind });
 
       return c.json({
-        response: result.responseText,
+        response: hasSuccessfulToolOwnedResponse(collectedToolExecs) ? "" : result.responseText,
         session: {
           sessionId: bookSession.sessionId,
           sessionKind: responseSessionKind,
