@@ -4,7 +4,10 @@ import type { Static, TSchema } from "@sinclair/typebox";
 import { appendPromptPackGuidance } from "../prompts/prompt-pack.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
 import type { Logger } from "../utils/logger.js";
-import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
+import {
+  hydrateActivatedSkillGuidance,
+  type ActivatedSkillGuidance,
+} from "../agent/skill-tool.js";
 
 export interface AgentContext {
   readonly client: LLMClient;
@@ -32,10 +35,7 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
-    return runWorkerAgent(this.ctx.client, this.ctx.model, appendActivatedSkillGuidance(
-      messages,
-      this.ctx.activatedSkills,
-    ), {
+    return runWorkerAgent(this.ctx.client, this.ctx.model, await this.appendTaskSkillGuidance(messages), {
       ...options,
       onStreamProgress: this.ctx.onStreamProgress,
       signal: this.ctx.signal,
@@ -50,7 +50,7 @@ export abstract class BaseAgent {
     return runWorkerAgentTool(
       this.ctx.client,
       this.ctx.model,
-      appendActivatedSkillGuidance(messages, this.ctx.activatedSkills),
+      await this.appendTaskSkillGuidance(messages),
       resultTool,
       {
         ...options,
@@ -64,6 +64,22 @@ export abstract class BaseAgent {
       promptId,
       projectRoot: this.ctx.projectRoot,
     });
+  }
+
+  private async appendTaskSkillGuidance(
+    messages: ReadonlyArray<LLMMessage>,
+  ): Promise<ReadonlyArray<LLMMessage>> {
+    const query = messages
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n\n");
+    let activations = this.ctx.activatedSkills;
+    try {
+      activations = await hydrateActivatedSkillGuidance(activations, query);
+    } catch (error) {
+      this.log?.warn(`[skills] Reference retrieval failed for ${this.name}: ${String(error)}`);
+    }
+    return appendActivatedSkillGuidance(messages, activations);
   }
 
   /**

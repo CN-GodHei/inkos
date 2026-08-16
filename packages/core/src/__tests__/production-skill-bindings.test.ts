@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hydrateActivatedSkillGuidance } from "../agent/skill-tool.js";
 import {
   NON_LONG_PRODUCTION_CAPABILITIES,
   PRODUCTION_SKILL_IDS,
@@ -57,5 +61,35 @@ describe("production skill bindings", () => {
       [defaultActivation],
       [userActivation, replacement],
     )).toEqual([replacement, userActivation]);
+  });
+
+  it("retrieves task-relevant references for production workers", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "inkos-skill-bindings-"));
+    try {
+      await mkdir(join(baseDir, "references"), { recursive: true });
+      await writeFile(join(baseDir, "references", "craft.md"), [
+        "# Craft",
+        "",
+        "## Dialogue pressure",
+        "Every reply changes leverage and leaves a concrete consequence.",
+        "",
+        "## Travel description",
+        "Use spatial anchors and sensory continuity.",
+      ].join("\n"));
+      const activation = {
+        skill: { ...skill("inkos-long-writing"), baseDir },
+        resources: [],
+      };
+
+      const [resolved] = await hydrateActivatedSkillGuidance(
+        [activation],
+        "Write a confrontation where every dialogue reply changes leverage.",
+      ) ?? [];
+
+      expect(resolved?.resources).toHaveLength(1);
+      expect(resolved?.resources[0]?.body).toContain("Every reply changes leverage");
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
   });
 });

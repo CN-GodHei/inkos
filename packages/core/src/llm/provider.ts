@@ -417,10 +417,17 @@ function parseEnvHeaders(): Record<string, string> | undefined {
 
 export class PartialResponseError extends Error {
   readonly partialContent: string;
-  constructor(partialContent: string, cause: unknown) {
+  readonly reason: "output-limit" | "interrupted";
+
+  constructor(
+    partialContent: string,
+    cause: unknown,
+    reason: "output-limit" | "interrupted" = "interrupted",
+  ) {
     super(`Stream interrupted after ${partialContent.length} chars: ${String(cause)}`);
     this.name = "PartialResponseError";
     this.partialContent = partialContent;
+    this.reason = reason;
   }
 }
 
@@ -1319,6 +1326,7 @@ async function chatCompletionViaCustomOpenAICompatible(
       throw new PartialResponseError(
         content || extractChatReasoningContent(json),
         new Error(`model reached the output limit (${finishReason})`),
+        "output-limit",
       );
     }
     if (!content) {
@@ -1406,6 +1414,7 @@ async function chatCompletionViaCustomOpenAICompatible(
     throw new PartialResponseError(
       content || reasoningContent,
       new Error(`model reached the output limit (${terminalFinishReason})`),
+      "output-limit",
     );
   }
   if (!content) {
@@ -1602,7 +1611,11 @@ async function chatCompletionViaPiAi(
       .map((block) => block.text)
       .join("");
     if (response.stopReason === "length") {
-      throw new PartialResponseError(content, new Error("model reached the output limit (length)"));
+      throw new PartialResponseError(
+        content,
+        new Error("model reached the output limit (length)"),
+        "output-limit",
+      );
     }
     if (!content) {
       const diag = `usage=${response.usage.input}+${response.usage.output}`;
@@ -1673,7 +1686,11 @@ async function chatCompletionViaPiAi(
 
   const content = chunks.join("");
   if (stoppedAtOutputLimit) {
-    throw new PartialResponseError(content, new Error("model reached the output limit (length)"));
+    throw new PartialResponseError(
+      content,
+      new Error("model reached the output limit (length)"),
+      "output-limit",
+    );
   }
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;

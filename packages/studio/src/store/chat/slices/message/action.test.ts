@@ -1001,6 +1001,77 @@ describe("chat message actions", () => {
     });
   });
 
+  it("does not duplicate a production card when task snapshot wins the startup race", async () => {
+    const store = createTestStore();
+    const sessionId = store.getState().createDraftSession(null, "script");
+    store.getState().setSelectedModel("deepseek-v4-flash", "kkaiapi");
+
+    let resolveAgent!: (value: unknown) => void;
+    fetchJson
+      .mockResolvedValueOnce({ session: { sessionId, bookId: null, sessionKind: "script" } })
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveAgent = resolve;
+      }));
+
+    const sent = store.getState().sendMessage(sessionId, "确认创建剧本", {
+      sessionKind: "script",
+      actionSource: "button",
+      requestedIntent: "script_create",
+    });
+    await vi.waitFor(() => expect(fakeEventSources).toHaveLength(1));
+    const agentRequest = fetchJson.mock.calls.find(([path]) => path === "/agent");
+    const sourceRequestId = JSON.parse(String(agentRequest?.[1]?.body)).clientRequestId as string;
+    const executionId = "direct-script_create-1";
+
+    // The task snapshot can be replayed while GET /events races the POST /agent
+    // startup. Its timestamp differs from the client stream timestamp.
+    fakeEventSources[0]?.emit("task:snapshot", {
+      sessionId,
+      sourceRequestId,
+      execution: {
+        id: executionId,
+        tool: "script_create",
+        label: "剧本创作",
+        status: "running",
+        startedAt: 10,
+      },
+    });
+    fakeEventSources[0]?.emit("tool:start", {
+      sessionId,
+      sourceRequestId,
+      id: executionId,
+      tool: "script_create",
+      background: true,
+    });
+
+    resolveAgent({
+      response: "",
+      details: {
+        toolExecutions: [{
+          id: executionId,
+          tool: "script_create",
+          label: "剧本创作",
+          status: "completed",
+          startedAt: 10,
+          completedAt: 20,
+          details: { kind: "script_created", scriptPath: "dramas/demo/script.md" },
+        }],
+      },
+      session: { sessionId, sessionKind: "script" },
+    });
+    await sent;
+
+    const matching = (store.getState().sessions[sessionId]?.messages ?? [])
+      .flatMap((message) => message.toolExecutions ?? [])
+      .filter((execution) => execution.id === executionId);
+    expect(matching).toHaveLength(1);
+    expect(matching[0]).toMatchObject({
+      status: "completed",
+      completedAt: 20,
+      details: { kind: "script_created", scriptPath: "dramas/demo/script.md" },
+    });
+  });
+
   it("reclassifies a free-text turn from a replayed task snapshot and stops the production task", async () => {
     const store = createTestStore();
     const sessionId = store.getState().createDraftSession("demo-book", "book");

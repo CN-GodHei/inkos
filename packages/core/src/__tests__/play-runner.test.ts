@@ -15,7 +15,7 @@ import type {
 } from "../models/play.js";
 import { PlayRunner } from "../play/play-runner.js";
 import type { PlaySceneRender } from "../play/play-agents.js";
-import { PlayStore } from "../play/play-store.js";
+import { PlayStore, type PlayTranscriptTurn } from "../play/play-store.js";
 import type { PlayGraphSnapshot } from "../play/play-file-db.js";
 
 class FakePlayDB {
@@ -76,6 +76,22 @@ class FakePlayDB {
     this.edges = new Map(snapshot.edges.map((edge) => [edge.id, edge]));
     this.stateSlots = new Map(snapshot.stateSlots.map((slot) => [slot.id, slot]));
     this.events = [...snapshot.events];
+  }
+}
+
+class FailingTranscriptStore extends PlayStore {
+  private failed = false;
+
+  override async appendTranscriptTurn(
+    worldId: string,
+    runId: string,
+    turn: PlayTranscriptTurn,
+  ): Promise<void> {
+    if (!this.failed && turn.role === "assistant") {
+      this.failed = true;
+      throw new Error("simulated transcript persistence failure");
+    }
+    await super.appendTranscriptTurn(worldId, runId, turn);
   }
 }
 
@@ -185,6 +201,43 @@ describe("PlayRunner", () => {
       .resolves.toContain("\"anchor\": \"仍在停车场刚上车的片刻\"");
     await expect(readFile(join(runDir, "projections", "scene.md"), "utf-8"))
       .resolves.toContain("屏幕弹出新城花园 187 次");
+    await expect(readFile(join(runDir, "status.json"), "utf-8"))
+      .resolves.toContain('"status": "complete"');
+  });
+
+  it("rolls back graph and run files when a turn fails during persistence", async () => {
+    const db = new FakePlayDB();
+    const store = new FailingTranscriptStore(root);
+    const runner = new PlayRunner({
+      projectRoot: root,
+      worldId: "rollback-world",
+      runId: "main",
+      store,
+      db,
+      agents: {
+        actionInterpreter: { interpret: vi.fn(async () => ({ actionKind: "look", intent: "检查门缝" })) },
+        worldMutator: {
+          proposeMutation: vi.fn(async () => ({
+            eventId: "evt-1",
+            turn: 1,
+            actionKind: "look",
+            summary: "门缝里出现一张票根。",
+            entities: { upsert: [{ id: "ticket", type: "evidence", label: "旧票根" }] },
+          })),
+        },
+        sceneRenderer: { render: vi.fn(async () => ({ sceneText: "门缝里压着一张旧票根。", suggestedActions: [] })) },
+      },
+    });
+
+    await expect(runner.step("检查门缝")).rejects.toThrow("simulated transcript persistence failure");
+    expect(db.events).toHaveLength(0);
+    expect(db.entities.has("ticket")).toBe(false);
+
+    const runDir = join(root, "worlds", "rollback-world", "runs", "main");
+    await expect(readFile(join(runDir, "events.jsonl"), "utf-8")).resolves.toBe("");
+    await expect(readFile(join(runDir, "transcript.jsonl"), "utf-8")).resolves.toBe("");
+    await expect(readFile(join(runDir, "status.json"), "utf-8"))
+      .resolves.toContain('"status": "failed"');
   });
 
   it("does not commit state when scene rendering fails", async () => {
@@ -451,8 +504,8 @@ describe("PlayRunner", () => {
 
     await expect(runner.step("我看墙上的钟")).rejects.toThrow(/missing entity/);
     await expect(readFile(join(root, "worlds", "bad-turn", "runs", "run-1", "transcript.jsonl"), "utf-8"))
-      .rejects
-      .toThrow();
+      .resolves
+      .toBe("");
   });
 
   it("feeds the world premise and existing entity roster to the mutator so it can reuse ids", async () => {

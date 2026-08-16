@@ -1,4 +1,5 @@
 import { BaseAgent } from "./base.js";
+import { completeLongForm } from "../llm/long-form-completion.js";
 
 export type ScriptTargetFormat =
   | "vertical_short_drama"
@@ -49,57 +50,133 @@ export interface InteractiveFilmCreationInput {
   readonly language?: "zh" | "en";
 }
 
-export class ScriptCreationAgent extends BaseAgent {
+abstract class LongFormProductionAgent extends BaseAgent {
+  protected async recoverProductionMarkdown(
+    fragments: string,
+    language: "zh" | "en",
+    requiredHeadings: readonly string[],
+  ): Promise<string> {
+    const response = await this.chat([
+      {
+        role: "system",
+        content: language === "en"
+          ? [
+              "You recover one canonical production document after a transport-confirmed output-limit continuation.",
+              "The fragments may contain scratch analysis, overlapping suffixes, and complete-document restarts.",
+              "Return exactly one complete Markdown deliverable. Preserve the user's requirements and the most developed usable content; remove process notes, scratch analysis, wrappers, duplicate document roots, and repeated sections.",
+              "Do not summarize or shorten the actual deliverable.",
+            ].join("\n")
+          : [
+              "你负责在模型因输出上限续写后，恢复唯一一份规范生产文档。",
+              "输入片段可能包含思考草稿、重叠后缀和从头重写的完整文档。",
+              "返回且只返回一份完整 Markdown 交付稿。保留用户要求和完成度最高的可用内容；删除流程说明、思考草稿、包装文本、重复文档开头和重复小节。",
+              "不得概括或缩短实际交付内容。",
+            ].join("\n"),
+      },
+      {
+        role: "user",
+        content: [
+          language === "en" ? "## Required Headings" : "## 必需标题",
+          ...requiredHeadings.map((heading) => `- ${heading}`),
+          "",
+          language === "en" ? "## Output Fragments" : "## 输出片段",
+          fragments,
+        ].join("\n"),
+      },
+    ], {
+      temperature: 0.1,
+      maxTokens: 32_000,
+    });
+    return response.content.trim();
+  }
+}
+
+export class ScriptCreationAgent extends LongFormProductionAgent {
   get name(): string {
     return "script-creation-writer";
   }
 
   async writeScript(input: ScriptCreationInput): Promise<string> {
     const language = input.language ?? "zh";
-    const response = await this.chat([
+    const messages = [
       { role: "system", content: buildScriptCreationSystemPrompt(language) },
       { role: "user", content: buildScriptCreationUserPrompt(input, language) },
-    ], {
-      temperature: 0.55,
-      maxTokens: estimateScriptMaxTokens(input),
+    ] as const;
+    const response = await completeLongForm({
+      messages,
+      language,
+      generate: (continuationMessages) => this.chat(continuationMessages, {
+        temperature: 0.55,
+        maxTokens: estimateScriptMaxTokens(input),
+      }),
+      onContinuation: (pass) => this.log?.warn(`[script] Output limit reached; continuing pass ${pass}.`),
+      recoverAfterContinuation: (fragments) => this.recoverProductionMarkdown(
+        fragments,
+        language,
+        language === "en" ? ["## Characters", "## Script"] : ["## 人物", "## 剧本正文"],
+      ),
     });
-    return response.content.trim();
+    return extractProductionDocument(response.content, input.title);
   }
 }
 
-export class StoryboardCreationAgent extends BaseAgent {
+export class StoryboardCreationAgent extends LongFormProductionAgent {
   get name(): string {
     return "storyboard-creation-writer";
   }
 
   async writeStoryboard(input: StoryboardCreationInput): Promise<string> {
     const language = input.language ?? "zh";
-    const response = await this.chat([
+    const messages = [
       { role: "system", content: buildStoryboardCreationSystemPrompt(language) },
       { role: "user", content: buildStoryboardCreationUserPrompt(input, language) },
-    ], {
-      temperature: 0.45,
-      maxTokens: estimateStoryboardMaxTokens(input),
+    ] as const;
+    const response = await completeLongForm({
+      messages,
+      language,
+      generate: (continuationMessages) => this.chat(continuationMessages, {
+        temperature: 0.45,
+        maxTokens: estimateStoryboardMaxTokens(input),
+      }),
+      onContinuation: (pass) => this.log?.warn(`[storyboard] Output limit reached; continuing pass ${pass}.`),
+      recoverAfterContinuation: (fragments) => this.recoverProductionMarkdown(
+        fragments,
+        language,
+        language === "en" ? ["## Storyboard", "## Image Prompts"] : ["## 分镜表", "## 图像提示词"],
+      ),
     });
-    return response.content.trim();
+    return extractProductionDocument(response.content, input.title);
   }
 }
 
-export class InteractiveFilmCreationAgent extends BaseAgent {
+export class InteractiveFilmCreationAgent extends LongFormProductionAgent {
   get name(): string {
     return "interactive-film-creation-writer";
   }
 
   async writeInteractiveFilm(input: InteractiveFilmCreationInput): Promise<string> {
     const language = input.language ?? "zh";
-    const response = await this.chat([
+    const messages = [
       { role: "system", content: buildInteractiveFilmCreationSystemPrompt(language) },
       { role: "user", content: buildInteractiveFilmCreationUserPrompt(input, language) },
-    ], {
-      temperature: 0.5,
-      maxTokens: estimateInteractiveFilmMaxTokens(input),
+    ] as const;
+    const response = await completeLongForm({
+      messages,
+      language,
+      generate: (continuationMessages) => this.chat(continuationMessages, {
+        temperature: 0.5,
+        maxTokens: estimateInteractiveFilmMaxTokens(input),
+      }),
+      onContinuation: (pass) => this.log?.warn(`[interactive-film] Output limit reached; continuing pass ${pass}.`),
+      recoverAfterContinuation: (fragments) => this.recoverProductionMarkdown(
+        fragments,
+        language,
+        language === "en"
+          ? ["## Story Tree", "## Variables and Flags", "## Ending Paths", "## Interactive Script", "## Storyboard and Image Prompts"]
+          : ["## 剧情树", "## 变量与旗标表", "## 多结局路径", "## 互动剧本", "## 分镜与图像提示词"],
+      ),
     });
-    return response.content.trim();
+    return extractProductionDocument(response.content, input.title);
   }
 }
 
@@ -297,6 +374,29 @@ export function extractMarkdownSection(raw: string, headings: readonly string[])
   return lines.slice(start, end).join("\n");
 }
 
+export function countMarkdownSections(raw: string, headings: readonly string[]): number {
+  const normalizedHeadings = headings.map(normalizeHeadingText);
+  let count = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    const match = /^(#{1,6})\s*(.+?)\s*$/u.exec(line);
+    if (!match) continue;
+    const text = normalizeHeadingText(match[2]!);
+    if (normalizedHeadings.some((heading) => headingMatches(text, heading))) count += 1;
+  }
+  return count;
+}
+
+export function extractProductionDocument(raw: string, title: string): string {
+  const lines = raw.split(/\r?\n/);
+  const normalizedTitle = normalizeHeadingText(title);
+  const start = lines.findIndex((line) => {
+    const match = /^#\s+(.+?)\s*$/u.exec(line);
+    if (!match) return false;
+    return normalizeHeadingText(match[1]!).startsWith(normalizedTitle);
+  });
+  return (start >= 0 ? lines.slice(start).join("\n") : raw).trim();
+}
+
 function normalizeHeadingText(text: string): string {
   return text
     .trim()
@@ -331,13 +431,17 @@ function buildScriptCreationSystemPrompt(language: "zh" | "en" = "zh"): string {
   if (language === "en") {
     return [
       "You are a script-creation tool, not a novel-continuation engine.",
-      "Execute the confirmed creation spec and source material. Unconfirmed choices remain adjustable.",
+      "This is a non-interactive production call after user confirmation. Execute the confirmed creation spec and source material now.",
+      "Never ask a question, offer options for the user to choose, or defer writing. Resolve unspecified creative details with a coherent working choice; they remain editable later.",
+      "The deliverable must include the exact Markdown headings `## Characters` and `## Script`, followed by a complete performable script rather than a proposal or outline.",
       "Output Markdown. No process notes, no model self-narration, no \"Here is\" preamble.",
     ].join("\n");
   }
   return [
     "你是剧本创作工具，不是小说续写器。",
-    "执行用户确认的创作规格和源素材；未确认的选择保持可调整。",
+    "这是用户确认后的非交互生产调用。现在执行已确认的创作规格和源素材。",
+    "不得提问、给用户列待选方案或推迟落笔。未指定的创意细节采用连贯的工作版本，后续仍可编辑。",
+    "交付稿必须包含准确的 Markdown 标题 `## 人物` 和 `## 剧本正文`，并在其后给出完整可排演剧本，不能只交方案或大纲。",
     "输出 Markdown。不要写流程说明、模型自述或“以下是”。",
   ].join("\n");
 }
@@ -355,6 +459,8 @@ function buildScriptCreationUserPrompt(input: ScriptCreationInput, language: "zh
       "## Output Format",
       `# ${input.title}`,
       "",
+      "## Characters",
+      "",
       "## Script",
       "",
       "Follow the target format. Vertical short drama: \"Episode N / scene slug / characters / action / dialogue / end-of-episode hook\". Standard screenplay: \"scene heading / action / character / dialogue\".",
@@ -369,6 +475,8 @@ function buildScriptCreationUserPrompt(input: ScriptCreationInput, language: "zh
     "",
     "## 输出格式",
     `# ${input.title}`,
+    "",
+    "## 人物",
     "",
     "## 剧本正文",
     "",

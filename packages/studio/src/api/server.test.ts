@@ -412,7 +412,6 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
     SessionKindSchema: actual.SessionKindSchema,
     DetectionConfigSchema: actual.DetectionConfigSchema,
-    InputGovernanceModeSchema: actual.InputGovernanceModeSchema,
     normalizeActionSource: actual.normalizeActionSource,
     normalizeActionPayload: actual.normalizeActionPayload,
     normalizePlayMode: actual.normalizePlayMode,
@@ -6508,18 +6507,9 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(raw.llm.model).toBe("deepseek-v4-flash");
   });
 
-  it("project advanced settings expose input governance and detection config", async () => {
+  it("project advanced settings expose detection config", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const modeInitial = await app.request("http://localhost/api/v1/project/input-governance-mode");
-    await expect(modeInitial.json()).resolves.toMatchObject({ mode: "v2" });
-
-    const modePut = await app.request("http://localhost/api/v1/project/input-governance-mode", {
-      method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "legacy" }),
-    });
-    await expect(modePut.json()).resolves.toMatchObject({ ok: true, mode: "legacy" });
 
     const detectionPut = await app.request("http://localhost/api/v1/project/detection", {
       method: "PUT", headers: { "Content-Type": "application/json" },

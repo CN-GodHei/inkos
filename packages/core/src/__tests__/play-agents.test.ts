@@ -109,7 +109,7 @@ describe("play agents", () => {
     expect(mutation.blockedReason).toContain("状态变更");
   });
 
-  it("uses placeholder examples in the Chinese mutator prompt instead of leaking concrete character names", async () => {
+  it("uses the structured result schema without embedding example story data", async () => {
     const agent = new PlayWorldMutatorAgent(ctx);
     const submit = vi.spyOn(agent as any, "submitStructured").mockResolvedValue({ blocked: true, blockedReason: "测试" });
 
@@ -125,12 +125,10 @@ describe("play agents", () => {
     const system = messages.find((message) => message.role === "system")?.content ?? "";
     expect(system).not.toContain("周野");
     expect(system).not.toContain("账房先生");
-    expect(system).not.toContain('"status":"seen"');
-    expect(system).not.toContain('"status":"collected"');
-    expect(system).toContain('"status":"已发现"');
-    expect(system).toContain('"status":"已收集"');
-    expect(system).toContain("范例只示结构");
-    expect(system).toContain("不得复用");
+    expect(system).not.toContain("示例线索");
+    expect(system).not.toContain("示例钥匙");
+    expect(system).not.toContain("actor_counterpart");
+    expect(system).toContain("submit_world_mutation");
   });
 
   it("treats actor_player as the reserved player id in the Chinese mutator prompt", async () => {

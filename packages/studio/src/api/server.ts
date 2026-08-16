@@ -44,7 +44,6 @@ import {
   ConsolidatorAgent,
   DetectionConfigSchema,
   ResearchSearchConfigSchema,
-  InputGovernanceModeSchema,
   GLOBAL_ENV_PATH,
   COVER_PROVIDER_PRESETS,
   createPlayDB,
@@ -134,6 +133,7 @@ import {
   type AgentSessionAttachment,
 } from "@actalk/inkos-core";
 import { isConfirmedProductionAction } from "../shared/confirmed-production.js";
+import { summarizeToolResult } from "../shared/tool-result.js";
 import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isSafeBookId } from "./safety.js";
@@ -284,16 +284,6 @@ function buildRunningTaskContextBlock(task: StudioTaskSnapshot, lang: StudioLang
   );
 }
 
-function summarizeResult(result: unknown): string {
-  if (typeof result === "string") return result.slice(0, 2000);
-  if (result && typeof result === "object") {
-    const r = result as Record<string, unknown>;
-    if (typeof r.content === "string") return r.content.slice(0, 2000);
-    if (typeof r.text === "string") return r.text.slice(0, 2000);
-  }
-  return String(result).slice(0, 2000);
-}
-
 function compareServiceListItems(
   left: { readonly service: string },
   right: { readonly service: string },
@@ -435,16 +425,7 @@ function nonTextModelMessage(modelId: string, lang: StudioLanguage = "zh"): stri
 }
 
 function extractToolError(result: unknown): string {
-  if (typeof result === "string") return result.slice(0, 500);
-  if (result && typeof result === "object") {
-    const r = result as Record<string, unknown>;
-    if (typeof r.content === "string") return r.content.slice(0, 500);
-    if (r.content && Array.isArray(r.content)) {
-      const textPart = r.content.find((c: any) => c.type === "text");
-      if (textPart) return (textPart as any).text?.slice(0, 500) ?? "";
-    }
-  }
-  return String(result).slice(0, 500);
+  return summarizeToolResult(result, 500);
 }
 
 function resolveProjectImageFile(root: string, rawPath: string): { readonly resolved: string; readonly contentType: string } {
@@ -4166,25 +4147,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }
   });
 
-  app.get("/api/v1/project/input-governance-mode", async (c) => {
-    const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
-    return c.json({ mode: raw.inputGovernanceMode === "legacy" ? "legacy" : "v2" });
-  });
-
-  app.put("/api/v1/project/input-governance-mode", async (c) => {
-    const { mode } = await c.req.json<{ mode?: unknown }>();
-    const parsed = InputGovernanceModeSchema.safeParse(mode);
-    if (!parsed.success) {
-      return c.json({ error: "mode must be legacy or v2" }, 400);
-    }
-    const configPath = join(root, "inkos.json");
-    const raw = JSON.parse(await readFile(configPath, "utf-8"));
-    raw.inputGovernanceMode = parsed.data;
-    const { writeFile: writeFileFs } = await import("node:fs/promises");
-    await writeFileFs(configPath, JSON.stringify(raw, null, 2), "utf-8");
-    return c.json({ ok: true, mode: parsed.data });
-  });
-
   app.get("/api/v1/project/detection", async (c) => {
     const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
     return c.json({ detection: raw.detection ?? null });
@@ -5139,7 +5101,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
                 exec.completedAt = Date.now();
                 exec.stages = exec.stages?.map(s => ({ ...s, status: "completed" as const }));
                 if (event.isError) exec.error = extractToolError(event.result);
-                else exec.result = summarizeResult(event.result);
+                else exec.result = summarizeToolResult(event.result);
                 exec.details = (event.result as { details?: unknown } | undefined)?.details;
                 if (
                   event.isError &&

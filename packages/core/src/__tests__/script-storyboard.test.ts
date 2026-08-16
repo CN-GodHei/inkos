@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  countMarkdownSections,
   extractMarkdownSection,
+  extractProductionDocument,
   extractStoryboardImagePrompts,
   normalizeScriptEpisodeEndLabels,
   renderInteractiveFilmSpec,
@@ -105,6 +107,26 @@ describe("script and storyboard creation helpers", () => {
 
     expect(section).toContain("N1 宴会前厅");
     expect(section).not.toContain("变量与旗标表");
+  });
+
+  it("extracts the production document after model scratch text", () => {
+    const document = extractProductionDocument([
+      "先分析几个方案。",
+      "这些内容不能进入交付稿。",
+      "",
+      "# 凌晨四点的空电梯",
+      "",
+      "## 人物",
+      "苏晚",
+      "",
+      "## 剧本正文",
+      "完整正文。",
+    ].join("\n"), "凌晨四点的空电梯");
+
+    expect(document).toMatch(/^# 凌晨四点的空电梯/u);
+    expect(document).not.toContain("先分析几个方案");
+    expect(countMarkdownSections(document, ["人物"])).toBe(1);
+    expect(countMarkdownSections(document, ["剧本正文"])).toBe(1);
   });
 
   it("extracts markdown-bold prompt labels with shot ids", () => {

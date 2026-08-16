@@ -5,7 +5,7 @@ import { runWorkerAgent } from "../agent/worker-agent.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode, RevisionGate } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
-import type { NotifyChannel, LLMConfig, AgentLLMOverride, InputGovernanceMode } from "../models/project.js";
+import type { NotifyChannel, LLMConfig, AgentLLMOverride } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import {
@@ -15,7 +15,6 @@ import {
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent, composeGovernedChapter, contextBudgetFromClient, type ComposeChapterOutput } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
-import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
 import { ReviserAgent, DEFAULT_REVISE_MODE, type ReviseMode } from "../agents/reviser.js";
@@ -34,6 +33,7 @@ import { appendActivatedSkillGuidance, type AgentContext } from "../agents/base.
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
+import { HooksStateSchema } from "../models/runtime-state.js";
 import type { ChapterMemo, ChapterTrace, ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { ContextCompressionCallback } from "../models/context-compression.js";
 import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
@@ -61,6 +61,11 @@ import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persi
 import { selectBookReferenceContext } from "../references/reference-context.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
+import {
+  createProductionRunSnapshot,
+  createRangeObservation,
+  writeProductionRunSnapshot,
+} from "../production/harness.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -94,15 +99,11 @@ function mergeChapterRevisionInstructions(
 
 interface ImportFoundationSourceOptions {
   readonly maxFullTextChars?: number;
-  readonly chapterExcerptChars?: number;
-  readonly titleCatalogChars?: number;
   readonly edgeChapterCount?: number;
   readonly middleAnchorCount?: number;
 }
 
 const DEFAULT_IMPORT_FOUNDATION_MAX_FULL_TEXT_CHARS = 80_000;
-const DEFAULT_IMPORT_CHAPTER_EXCERPT_CHARS = 6_000;
-const DEFAULT_IMPORT_TITLE_CATALOG_CHARS = 24_000;
 const DEFAULT_IMPORT_EDGE_CHAPTER_COUNT = 4;
 const DEFAULT_IMPORT_MIDDLE_ANCHOR_COUNT = 8;
 
@@ -121,18 +122,6 @@ function estimateImportFullTextLength(
   chapters: ReadonlyArray<{ readonly title: string; readonly content: string }>,
 ): number {
   return chapters.reduce((total, chapter) => total + chapter.title.length + chapter.content.length + 24, 0);
-}
-
-function excerptHeadTail(text: string, maxChars: number, language: LengthLanguage): string {
-  const clean = text.trim();
-  if (clean.length <= maxChars) return clean;
-  const headChars = Math.max(200, Math.floor(maxChars * 0.6));
-  const tailChars = Math.max(200, maxChars - headChars);
-  const omitted = clean.length - headChars - tailChars;
-  const marker = language === "en"
-    ? `\n\n[... ${omitted} chars omitted for import-context budget ...]\n\n`
-    : `\n\n【中间省略 ${omitted} 字，用于控制导入上下文预算】\n\n`;
-  return `${clean.slice(0, headChars).trimEnd()}${marker}${clean.slice(-tailChars).trimStart()}`;
 }
 
 function pickImportAnchorIndexes(
@@ -159,38 +148,12 @@ function pickImportAnchorIndexes(
 function buildTitleCatalog(
   chapters: ReadonlyArray<{ readonly title: string; readonly content: string }>,
   language: LengthLanguage,
-  maxChars: number,
 ): string {
-  const lines = chapters.map((chapter, index) =>
+  return chapters.map((chapter, index) =>
     language === "en"
       ? `- Chapter ${index + 1}: ${chapter.title} (${chapter.content.length} chars)`
       : `- 第${index + 1}章：${chapter.title}（${chapter.content.length}字）`,
-  );
-  const joined = lines.join("\n");
-  if (joined.length <= maxChars) return joined;
-
-  const headBudget = Math.floor(maxChars * 0.55);
-  const tailBudget = maxChars - headBudget;
-  const head: string[] = [];
-  const tail: string[] = [];
-  let headChars = 0;
-  let tailChars = 0;
-  for (const line of lines) {
-    if (headChars + line.length + 1 > headBudget) break;
-    head.push(line);
-    headChars += line.length + 1;
-  }
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]!;
-    if (tailChars + line.length + 1 > tailBudget) break;
-    tail.unshift(line);
-    tailChars += line.length + 1;
-  }
-  const omitted = lines.length - head.length - tail.length;
-  const marker = language === "en"
-    ? `- ... ${omitted} chapter titles omitted ...`
-    : `- ……中间 ${omitted} 个章节标题省略……`;
-  return [...head, marker, ...tail].join("\n");
+  ).join("\n");
 }
 
 /**
@@ -226,8 +189,6 @@ export function buildImportFoundationSource(
   options: ImportFoundationSourceOptions = {},
 ): string {
   const maxFullTextChars = options.maxFullTextChars ?? DEFAULT_IMPORT_FOUNDATION_MAX_FULL_TEXT_CHARS;
-  const chapterExcerptChars = options.chapterExcerptChars ?? DEFAULT_IMPORT_CHAPTER_EXCERPT_CHARS;
-  const titleCatalogChars = options.titleCatalogChars ?? DEFAULT_IMPORT_TITLE_CATALOG_CHARS;
   const edgeChapterCount = options.edgeChapterCount ?? DEFAULT_IMPORT_EDGE_CHAPTER_COUNT;
   const middleAnchorCount = options.middleAnchorCount ?? DEFAULT_IMPORT_MIDDLE_ANCHOR_COUNT;
 
@@ -240,24 +201,19 @@ export function buildImportFoundationSource(
     ? [
         "## Import foundation source package",
         "",
-        `The imported book has ${chapters.length} chapters. To avoid overflowing the LLM context, this package keeps the opening chapters, ending/continuation point, selected middle anchors, and a capped title catalog. Full chapters will still be replayed sequentially after foundation generation to rebuild truth files.`,
+        `The imported book has ${chapters.length} chapters. This package selects complete opening chapters, the ending/continuation point, and complete middle anchors. It also keeps the full title catalog. Unselected chapters will be replayed sequentially after foundation generation to rebuild truth files.`,
       ].join("\n")
     : [
         "## 导入基础设定压缩资料包",
         "",
-        `本次导入共 ${chapters.length} 章。为避免超出 LLM 上下文，这里保留开篇、结尾续写点、少量中段锚点和标题目录；完整章节将在后续顺序回放中逐章分析并沉淀 truth files。`,
+        `本次导入共 ${chapters.length} 章。这里选取完整的开篇章节、结尾续写点和中段锚点，并保留完整标题目录；未选章节将在后续顺序回放中逐章分析并沉淀 truth files。`,
       ].join("\n");
-  const catalogTitle = language === "en" ? "## Capped chapter title catalog" : "## 章节标题目录（截断）";
-  const anchorsTitle = language === "en" ? "## Source excerpts for architecture" : "## 用于反推基础设定的正文摘录";
+  const catalogTitle = language === "en" ? "## Complete chapter title catalog" : "## 完整章节标题目录";
+  const anchorsTitle = language === "en" ? "## Complete source chapters selected for architecture" : "## 用于反推基础设定的完整锚点章节";
   const anchorText = anchorIndexes
     .map((index) => {
       const chapter = chapters[index]!;
-      return formatImportedChapter(
-        chapter,
-        index,
-        language,
-        excerptHeadTail(chapter.content, chapterExcerptChars, language),
-      );
+      return formatImportedChapter(chapter, index, language);
     })
     .join("\n\n---\n\n");
 
@@ -265,7 +221,7 @@ export function buildImportFoundationSource(
     header,
     "",
     catalogTitle,
-    buildTitleCatalog(chapters, language, titleCatalogChars),
+    buildTitleCatalog(chapters, language),
     "",
     anchorsTitle,
     anchorText,
@@ -304,7 +260,6 @@ export interface PipelineConfig {
   readonly radarSources?: ReadonlyArray<RadarSource>;
   readonly externalContext?: string;
   readonly modelOverrides?: Record<string, string | AgentLLMOverride>;
-  readonly inputGovernanceMode?: InputGovernanceMode;
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
   readonly onContextCompression?: ContextCompressionCallback;
@@ -1194,23 +1149,14 @@ export class PipelineRunner {
         ...(wordCount ? { wordCountOverride: wordCount } : {}),
       });
       const writerCount = countChapterLength(output.content, lengthSpec.countingMode);
-      let totalUsage: TokenUsageSummary = output.tokenUsage ?? {
+      const totalUsage: TokenUsageSummary = output.tokenUsage ?? {
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
       };
-      const normalizedDraft = await this.normalizeDraftLengthIfNeeded({
-        bookId,
-        chapterNumber,
-        chapterContent: output.content,
-        lengthSpec,
-        chapterIntent: writeInput.chapterIntent,
-      });
-      totalUsage = PipelineRunner.addUsage(totalUsage, normalizedDraft.tokenUsage);
       const draftOutput: WriteChapterOutput = {
         ...output,
-        content: normalizedDraft.content,
-        wordCount: normalizedDraft.wordCount,
+        wordCount: writerCount,
         tokenUsage: totalUsage,
       };
       const lengthWarnings = this.buildLengthWarnings(
@@ -1221,10 +1167,9 @@ export class PipelineRunner {
       const lengthTelemetry = this.buildLengthTelemetry({
         lengthSpec,
         writerCount,
-        postWriterNormalizeCount: normalizedDraft.wordCount,
         postReviseCount: 0,
         finalCount: draftOutput.wordCount,
-        normalizeApplied: normalizedDraft.applied,
+        repairApplied: false,
         lengthWarning: lengthWarnings.length > 0,
       });
       this.logLengthWarnings(lengthWarnings);
@@ -1237,15 +1182,9 @@ export class PipelineRunner {
       const filePath = join(chaptersDir, filename);
 
       const resolvedLang = book.language ?? gp.language;
-      const heading = resolvedLang === "en"
-        ? `# Chapter ${chapterNumber}: ${draftOutput.title}`
-        : `# 第${chapterNumber}章 ${draftOutput.title}`;
-      await writeFile(filePath, `${heading}\n\n${draftOutput.content}`, "utf-8");
-
-      // Save truth files
+      // Persist the chapter and its complete truth update as one atomic file set.
       this.logStage(stageLanguage, { zh: "落盘草稿与真相文件", en: "persisting draft and truth files" });
       await writer.saveChapter(bookDir, draftOutput, gp.numericalSystem, resolvedLang);
-      await writer.saveNewTruthFiles(bookDir, draftOutput, resolvedLang);
       await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, draftOutput);
       await this.syncNarrativeMemoryIndex(bookId);
 
@@ -1444,15 +1383,13 @@ export class PipelineRunner {
         persistedChapterBrief,
         externalContext ?? this.config.externalContext,
       );
-      const reviseControlInput = (this.config.inputGovernanceMode ?? "v2") === "legacy"
-        ? undefined
-        : await this.createGovernedArtifacts(
-          book,
-          bookDir,
-          targetChapter,
-          effectiveExternalContext,
-          { reuseExistingIntentWhenContextMissing: true },
-        );
+      const reviseControlInput = await this.createGovernedArtifacts(
+        book,
+        bookDir,
+        targetChapter,
+        effectiveExternalContext,
+        { reuseExistingIntentWhenContextMissing: true },
+      );
       const preRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -1535,12 +1472,8 @@ export class PipelineRunner {
       if (reviseOutput.revisedContent.length === 0) {
         throw new Error("Reviser returned empty content");
       }
-      const normalizedRevision = await this.normalizeDraftLengthIfNeeded({
-        bookId,
-        chapterNumber: targetChapter,
-        chapterContent: reviseOutput.revisedContent,
-        lengthSpec,
-      });
+      const revisedContent = reviseOutput.revisedContent;
+      const revisedCount = countChapterLength(revisedContent, lengthSpec.countingMode);
       const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
       const stateValidator = new StateValidatorAgent(this.agentCtxFor("stateValidator", bookId));
       let settledRevision = await writer.settleChapterState({
@@ -1549,13 +1482,13 @@ export class PipelineRunner {
         chapterNumber: targetChapter,
         baselineChapter,
         title: chapterMeta.title,
-        content: normalizedRevision.content,
+        content: revisedContent,
         chapterIntent: reviseControlInput?.plan.intentMarkdown,
         contextPackage: reviseControlInput?.composed.contextPackage,
         ruleStack: reviseControlInput?.composed.ruleStack,
       });
       let stateValidation = await stateValidator.validate(
-        normalizedRevision.content,
+        revisedContent,
         targetChapter,
         baselineState,
         settledRevision.updatedState,
@@ -1572,7 +1505,7 @@ export class PipelineRunner {
           chapterNumber: targetChapter,
           baselineChapter,
           title: chapterMeta.title,
-          content: normalizedRevision.content,
+          content: revisedContent,
           reducedControlInput: reviseControlInput
             ? {
                 chapterIntent: reviseControlInput.plan.intentMarkdown,
@@ -1619,7 +1552,7 @@ export class PipelineRunner {
         auditor,
         book,
         bookDir,
-        chapterContent: normalizedRevision.content,
+        chapterContent: revisedContent,
         chapterNumber: targetChapter,
         language,
         auditOptions: reviseControlInput
@@ -1651,16 +1584,15 @@ export class PipelineRunner {
       const revisionBaseCount = countChapterLength(content, lengthSpec.countingMode);
       const lengthWarnings = this.buildLengthWarnings(
         targetChapter,
-        normalizedRevision.wordCount,
+        revisedCount,
         lengthSpec,
       );
       const lengthTelemetry = this.buildLengthTelemetry({
         lengthSpec,
         writerCount: revisionBaseCount,
-        postWriterNormalizeCount: 0,
-        postReviseCount: normalizedRevision.wordCount,
-        finalCount: normalizedRevision.wordCount,
-        normalizeApplied: normalizedRevision.applied,
+        postReviseCount: revisedCount,
+        finalCount: revisedCount,
+        repairApplied: revisedContent !== content,
         lengthWarning: lengthWarnings.length > 0,
       });
 
@@ -1742,7 +1674,7 @@ export class PipelineRunner {
           rootDir: bookDir,
           writes: [{
             relativePath: join("chapters", existingFile),
-            content: `${reviseHeading}\n\n${normalizedRevision.content}`,
+            content: `${reviseHeading}\n\n${revisedContent}`,
           }],
         });
       }
@@ -1756,7 +1688,7 @@ export class PipelineRunner {
           return {
               ...ch,
               status: (effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
-              wordCount: normalizedRevision.wordCount,
+              wordCount: revisedCount,
               updatedAt: new Date().toISOString(),
               auditIssues: effectivePostRevision.auditResult.issues.map((i) => `[${i.severity}] ${i.description}`),
               lengthWarnings,
@@ -1802,13 +1734,13 @@ export class PipelineRunner {
       }
 
       await this.emitWebhook("revision-complete", bookId, targetChapter, {
-        wordCount: normalizedRevision.wordCount,
+        wordCount: revisedCount,
         fixedCount: reviseOutput.fixedIssues.length,
       });
 
       return {
         chapterNumber: targetChapter,
-        wordCount: normalizedRevision.wordCount,
+        wordCount: revisedCount,
         fixedIssues: reviseOutput.fixedIssues,
         applied: true,
         status: effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed",
@@ -1972,6 +1904,100 @@ export class PipelineRunner {
     temperatureOverride?: number,
     externalContext?: string,
   ): Promise<ChapterPipelineResult> {
+    const book = await this.state.loadBookConfig(bookId);
+    const bookDir = this.state.bookDir(bookId);
+    const chapterNumber = await this.state.getNextChapterNumber(bookId);
+    const paddedChapter = String(chapterNumber).padStart(4, "0");
+    const runPath = join("story", "runtime", `chapter-${paddedChapter}.run.json`);
+    const runId = `${bookId}:chapter-${paddedChapter}`;
+    const baseRun = {
+      kind: "long-fiction" as const,
+      id: runId,
+      stage: `chapter-${chapterNumber}`,
+      model: this.config.model,
+      skillIds: ["inkos-long-writing"],
+      resumeCursor: String(chapterNumber),
+    };
+
+    await writeProductionRunSnapshot({
+      rootDir: bookDir,
+      runPath,
+      run: createProductionRunSnapshot({
+        ...baseRun,
+        status: "running",
+        artifacts: [],
+        observations: [],
+      }),
+    });
+
+    try {
+      const result = await this._executeNextChapterLocked(
+        bookId,
+        wordCount,
+        temperatureOverride,
+        externalContext,
+      );
+      const chapterPrefix = `${paddedChapter}_`;
+      const chapterFile = (await readdir(join(bookDir, "chapters")))
+        .find((file) => file.startsWith(chapterPrefix) && file.endsWith(".md"));
+      if (!chapterFile) {
+        throw new Error(`Chapter ${chapterNumber} completed without a persisted chapter artifact.`);
+      }
+      const lengthSpec = result.lengthTelemetry ?? buildLengthSpec(
+        wordCount ?? book.chapterWordCount,
+        await this.resolveBookLanguage(book),
+      );
+      const chapterPath = join("chapters", chapterFile);
+      const artifacts = [
+        chapterPath,
+        join("chapters", "index.json"),
+        join("story", "current_state.md"),
+        join("story", "pending_hooks.md"),
+        join("story", "snapshots", String(chapterNumber)),
+        join("story", "runtime", `chapter-${paddedChapter}.trace.json`),
+      ];
+      await writeProductionRunSnapshot({
+        rootDir: bookDir,
+        runPath,
+        run: createProductionRunSnapshot({
+          ...baseRun,
+          status: result.status === "ready-for-review" ? "complete" : "needs-review",
+          artifacts,
+          observations: [createRangeObservation({
+            metric: "chapter-length",
+            actual: result.wordCount,
+            target: lengthSpec.target,
+            min: lengthSpec.hardMin,
+            max: lengthSpec.hardMax,
+            unit: lengthSpec.countingMode,
+            evidence: chapterPath,
+          })],
+        }),
+      });
+      return result;
+    } catch (error) {
+      const cancelled = this.currentAbortSignal()?.aborted === true;
+      await writeProductionRunSnapshot({
+        rootDir: bookDir,
+        runPath,
+        run: createProductionRunSnapshot({
+          ...baseRun,
+          status: cancelled ? "cancelled" : "failed",
+          artifacts: [],
+          observations: [],
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async _executeNextChapterLocked(
+    bookId: string,
+    wordCount?: number,
+    temperatureOverride?: number,
+    externalContext?: string,
+  ): Promise<ChapterPipelineResult> {
     this.throwIfOperationAborted();
     await this.state.ensureControlDocuments(bookId);
     const book = await this.state.loadBookConfig(bookId);
@@ -1986,15 +2012,13 @@ export class PipelineRunner {
       chapterNumber,
       externalContext,
     );
-    const reducedControlInput = writeInput.chapterIntent && writeInput.contextPackage && writeInput.ruleStack
-      ? {
-          chapterIntent: writeInput.chapterIntent,
-          chapterMemo: writeInput.chapterMemo,
-          chapterIntentData: writeInput.chapterIntentData,
-          contextPackage: writeInput.contextPackage,
-          ruleStack: writeInput.ruleStack,
-        }
-      : undefined;
+    const reducedControlInput = {
+      chapterIntent: writeInput.chapterIntent,
+      chapterMemo: writeInput.chapterMemo,
+      chapterIntentData: writeInput.chapterIntentData,
+      contextPackage: writeInput.contextPackage,
+      ruleStack: writeInput.ruleStack,
+    };
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const lengthSpec = buildLengthSpec(
@@ -2031,8 +2055,7 @@ export class PipelineRunner {
     let revised: boolean;
     let auditResult: AuditResult;
     let postReviseCount: number;
-    let normalizeApplied: boolean;
-    let preAuditNormalizedWordCount: number | undefined;
+    let repairApplied: boolean;
 
     if ((this.config.chapterReviewMode ?? "auto") === "manual") {
       // C4a: write-only checkpoint. Stop right after the draft — skip the
@@ -2044,8 +2067,7 @@ export class PipelineRunner {
       finalWordCount = countChapterLength(finalContent, lengthSpec.countingMode);
       revised = false;
       postReviseCount = 0;
-      normalizeApplied = finalContent !== output.content;
-      preAuditNormalizedWordCount = writerCount;
+      repairApplied = false;
       auditResult = {
         passed: false,
         issues: [],
@@ -2065,13 +2087,6 @@ export class PipelineRunner {
         initialUsage: totalUsage,
         createReviser: () => new ReviserAgent(this.agentCtxFor("reviser", bookId)),
         auditor,
-        normalizeDraftLengthIfNeeded: (chapterContent) => this.normalizeDraftLengthIfNeeded({
-          bookId,
-          chapterNumber,
-          chapterContent,
-          lengthSpec,
-          chapterIntent: writeInput.chapterIntent,
-        }),
         normalizePostWriteSurface: (chapterContent) =>
           normalizePostWriteSurface(chapterContent, pipelineLang),
         assertChapterContentNotEmpty: (content, stage) =>
@@ -2105,35 +2120,10 @@ export class PipelineRunner {
       revised = reviewResult.revised;
       auditResult = reviewResult.auditResult;
       postReviseCount = reviewResult.postReviseCount;
-      normalizeApplied = reviewResult.normalizeApplied;
-      preAuditNormalizedWordCount = reviewResult.preAuditNormalizedWordCount;
+      repairApplied = reviewResult.repairApplied;
     }
 
     this.throwIfOperationAborted();
-    // 3b. Lightweight per-chapter promotion pass — check if any hooks should
-    // be promoted based on advanced_count derived from chapter_summaries.
-    // Runs BEFORE persistence so the reviewer of the NEXT chapter sees the
-    // updated ledger. No LLM calls — pure ledger parse + threshold check.
-    {
-      const { rerunPromotionPass } = await import("../utils/hook-promotion.js");
-      const { parsePendingHooksMarkdown, renderHookSnapshot } = await import("../utils/story-markdown.js");
-      const promotionStoryDir = join(bookDir, "story");
-      const ledgerPath = join(promotionStoryDir, "pending_hooks.md");
-      const ledgerRaw = await readFile(ledgerPath, "utf-8").catch(() => "");
-      if (ledgerRaw.trim()) {
-        const hooks = parsePendingHooksMarkdown(ledgerRaw);
-        if (hooks.length > 0) {
-          const summariesRaw = await readFile(join(promotionStoryDir, "chapter_summaries.md"), "utf-8").catch(() => "");
-          const promotionResult = rerunPromotionPass(hooks, summariesRaw);
-          if (promotionResult.updated) {
-            const ledgerLang: "zh" | "en" = /[\u4e00-\u9fff]/.test(ledgerRaw) ? "zh" : "en";
-            await writeFile(ledgerPath, renderHookSnapshot([...promotionResult.hooks], ledgerLang), "utf-8");
-            this.config.logger?.info(`[promotion] ${promotionResult.flippedCount} hook(s) promoted after chapter ${chapterNumber}`);
-          }
-        }
-      }
-    }
-
     this.throwIfOperationAborted();
     // 4. Save the final chapter and truth files from a single persistence source
     this.logStage(stageLanguage, { zh: "落盘最终章节", en: "persisting final chapter" });
@@ -2169,6 +2159,28 @@ export class PipelineRunner {
         ...persistenceOutput,
         title: finalTitleResolution.title,
       };
+    }
+    {
+      const { rerunPromotionPass } = await import("../utils/hook-promotion.js");
+      const { parsePendingHooksMarkdown, renderHookSnapshot } = await import("../utils/story-markdown.js");
+      const hooks = parsePendingHooksMarkdown(persistenceOutput.updatedHooks);
+      const summaries = persistenceOutput.updatedChapterSummaries
+        ?? await readFile(join(bookDir, "story", "chapter_summaries.md"), "utf-8").catch(() => "");
+      const promotion = rerunPromotionPass(hooks, summaries);
+      if (promotion.updated) {
+        const renderedHooks = renderHookSnapshot([...promotion.hooks], pipelineLang);
+        persistenceOutput = {
+          ...persistenceOutput,
+          updatedHooks: renderedHooks,
+          ...(persistenceOutput.runtimeStateSnapshot ? {
+            runtimeStateSnapshot: {
+              ...persistenceOutput.runtimeStateSnapshot,
+              hooks: HooksStateSchema.parse({ hooks: [...promotion.hooks] }),
+            },
+          } : {}),
+        };
+        this.config.logger?.info(`[promotion] ${promotion.flippedCount} hook(s) promoted after chapter ${chapterNumber}`);
+      }
     }
     if (persistenceOutput.title !== output.title) {
       const description = pipelineLang === "en"
@@ -2211,10 +2223,9 @@ export class PipelineRunner {
     const lengthTelemetry = this.buildLengthTelemetry({
       lengthSpec,
       writerCount,
-      postWriterNormalizeCount: preAuditNormalizedWordCount,
       postReviseCount,
       finalCount: finalWordCount,
-      normalizeApplied,
+      repairApplied,
       lengthWarning: lengthWarnings.length > 0,
     });
     this.logLengthWarnings(lengthWarnings);
@@ -2309,7 +2320,6 @@ export class PipelineRunner {
       loadChapterIndex: () => this.state.loadChapterIndex(bookId),
       saveChapter: () => writer.saveChapter(bookDir, persistenceOutput, gp.numericalSystem, pipelineLang),
       saveTruthFiles: async () => {
-        await writer.saveNewTruthFiles(bookDir, persistenceOutput, pipelineLang);
         await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, persistenceOutput);
         this.logStage(stageLanguage, { zh: "同步记忆索引", en: "syncing memory indexes" });
         await this.syncNarrativeMemoryIndex(bookId);
@@ -2464,7 +2474,6 @@ export class PipelineRunner {
     }
 
     await writer.saveChapter(bookDir, repairedOutput, gp.numericalSystem, pipelineLang);
-    await writer.saveNewTruthFiles(bookDir, repairedOutput, pipelineLang);
     await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, repairedOutput);
     await this.syncNarrativeMemoryIndex(bookId);
     await this.state.snapshotState(bookId, targetChapter);
@@ -2540,15 +2549,13 @@ export class PipelineRunner {
       );
     });
 
-    const reducedControlInput = (this.config.inputGovernanceMode ?? "v2") === "legacy"
-      ? undefined
-      : await this.createGovernedArtifacts(
-        book,
-        bookDir,
-        targetChapter,
-        this.config.externalContext,
-        { reuseExistingIntentWhenContextMissing: true },
-      );
+    const reducedControlInput = await this.createGovernedArtifacts(
+      book,
+      bookDir,
+      targetChapter,
+      this.config.externalContext,
+      { reuseExistingIntentWhenContextMissing: true },
+    );
 
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
     let syncedOutput = await writer.settleChapterState({
@@ -2615,7 +2622,6 @@ export class PipelineRunner {
     }
 
     await writer.saveChapter(bookDir, syncedOutput, gp.numericalSystem, pipelineLang);
-    await writer.saveNewTruthFiles(bookDir, syncedOutput, pipelineLang);
     await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, syncedOutput);
     await this.syncNarrativeMemoryIndex(bookId);
     await this.state.snapshotState(bookId, targetChapter);
@@ -3129,12 +3135,6 @@ ${matrix}`,
         // Save chapter file + core truth files (state, ledger, hooks)
         await writer.saveChapter(bookDir, persistedOutput, gp.numericalSystem, resolvedLanguage);
 
-        // Save extended truth files (summaries, subplots, emotional arcs, character matrix)
-        await writer.saveNewTruthFiles(bookDir, {
-          ...output,
-          postWriteErrors: [],
-          postWriteWarnings: [],
-        }, resolvedLanguage);
         await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, output);
         await this.syncNarrativeMemoryIndex(input.bookId);
 
@@ -3264,10 +3264,6 @@ ${matrix}`,
   ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "chapterMemo" | "chapterIntentData" | "contextPackage" | "ruleStack"> & {
     readonly contextTrace?: ChapterContextTraceSummary;
   }> {
-    if ((this.config.inputGovernanceMode ?? "v2") === "legacy") {
-      return { externalContext };
-    }
-
     const { plan, composed } = await this.createGovernedArtifacts(
       book,
       bookDir,
@@ -3392,66 +3388,6 @@ ${matrix}`,
       "| --- | --- | --- | --- | --- | --- | --- |",
       "",
     ].join("\n");
-  }
-
-  private async normalizeDraftLengthIfNeeded(params: {
-    bookId: string;
-    chapterNumber: number;
-    chapterContent: string;
-    lengthSpec: LengthSpec;
-    chapterIntent?: string;
-  }): Promise<{
-    content: string;
-    wordCount: number;
-    applied: boolean;
-    tokenUsage?: TokenUsageSummary;
-  }> {
-    const writerCount = countChapterLength(
-      params.chapterContent,
-      params.lengthSpec.countingMode,
-    );
-    if (!isOutsideHardRange(writerCount, params.lengthSpec)) {
-      return {
-        content: params.chapterContent,
-        wordCount: writerCount,
-        applied: false,
-      };
-    }
-
-    const normalizer = new LengthNormalizerAgent(
-      this.agentCtxFor("length-normalizer", params.bookId),
-    );
-    const normalized = await normalizer.normalizeChapter({
-      chapterContent: params.chapterContent,
-      lengthSpec: params.lengthSpec,
-      chapterIntent: params.chapterIntent,
-    });
-
-    // Safety net: if normalizer output is less than 25% of original, it was too destructive.
-    // Reject and keep original content.
-    if (normalized.finalCount < writerCount * 0.25) {
-      this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
-        zh: `字数归一化被拒绝：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}（砍了${Math.round((1 - normalized.finalCount / writerCount) * 100)}%，超过安全阈值）`,
-        en: `Length normalization rejected for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount} (cut ${Math.round((1 - normalized.finalCount / writerCount) * 100)}%, exceeds safety threshold)`,
-      });
-      return {
-        content: params.chapterContent,
-        wordCount: writerCount,
-        applied: false,
-      };
-    }
-
-    this.logInfo(this.languageFromLengthSpec(params.lengthSpec), {
-      zh: `审计前字数归一化：第${params.chapterNumber}章 ${writerCount} -> ${normalized.finalCount}`,
-      en: `Length normalization before audit for chapter ${params.chapterNumber}: ${writerCount} -> ${normalized.finalCount}`,
-    });
-
-    return {
-      content: normalized.normalizedContent,
-      wordCount: normalized.finalCount,
-      applied: normalized.applied,
-      tokenUsage: normalized.tokenUsage,
-    };
   }
 
   private assertChapterContentNotEmpty(content: string, chapterNumber: number, stage: string): void {
@@ -3627,8 +3563,8 @@ ${matrix}`,
     }
     return [
       this.localize(this.languageFromLengthSpec(lengthSpec), {
-        zh: `第${chapterNumber}章经过一次字数归一化后仍超出硬区间（${lengthSpec.hardMin}-${lengthSpec.hardMax}，实际 ${finalCount}）。`,
-        en: `Chapter ${chapterNumber} remains outside hard range (${lengthSpec.hardMin}-${lengthSpec.hardMax}, actual ${finalCount}) after a single normalization pass.`,
+        zh: `第${chapterNumber}章未达到篇幅预算（${lengthSpec.hardMin}-${lengthSpec.hardMax}，实际 ${finalCount}）。`,
+        en: `Chapter ${chapterNumber} is outside its length budget (${lengthSpec.hardMin}-${lengthSpec.hardMax}, actual ${finalCount}).`,
       }),
     ];
   }
@@ -3636,10 +3572,9 @@ ${matrix}`,
   private buildLengthTelemetry(params: {
     lengthSpec: LengthSpec;
     writerCount: number;
-    postWriterNormalizeCount: number;
     postReviseCount: number;
     finalCount: number;
-    normalizeApplied: boolean;
+    repairApplied: boolean;
     lengthWarning: boolean;
   }): LengthTelemetry {
     return {
@@ -3650,10 +3585,9 @@ ${matrix}`,
       hardMax: params.lengthSpec.hardMax,
       countingMode: params.lengthSpec.countingMode,
       writerCount: params.writerCount,
-      postWriterNormalizeCount: params.postWriterNormalizeCount,
       postReviseCount: params.postReviseCount,
       finalCount: params.finalCount,
-      normalizeApplied: params.normalizeApplied,
+      repairApplied: params.repairApplied,
       lengthWarning: params.lengthWarning,
     };
   }

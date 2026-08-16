@@ -1,19 +1,22 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   runInteractiveFilmCreation,
+  runScriptCreation,
   runStoryboardCreation,
   type StoryboardAssetsManifest,
 } from "../pipeline/script-storyboard-runner.js";
 import type { AgentContext } from "../agents/base.js";
 import { loadStoryGraph } from "../interactive-film/graph-store.js";
+import { PartialResponseError } from "../llm/provider.js";
 
 const chatCompletionMock = vi.hoisted(() => vi.fn());
 const generateStoryGraphMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../llm/provider.js", () => ({
+vi.mock("../llm/provider.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../llm/provider.js")>(),
   chatCompletion: chatCompletionMock,
 }));
 
@@ -150,6 +153,127 @@ describe("storyboard creation runner", () => {
     expect(messages[0]?.content).toContain("inkos-storyboard");
     expect(messages[0]?.content).toContain("Translate narrative beats into visible shots.");
     expect(messages[0]?.content).not.toContain("inkos-long-writing");
+  });
+
+  it("continues a script after a confirmed model output limit before committing it", async () => {
+    chatCompletionMock.mockReset();
+    chatCompletionMock.mockRejectedValueOnce(new PartialResponseError(
+      "# 监控里没有他\n\n## 剧本正文\n\n便利店。暴雨。\n陌生人推门。",
+      new Error("model reached the output limit (length)"),
+      "output-limit",
+    ));
+    chatCompletionMock.mockResolvedValueOnce({
+      content: "陌生人推门。\n夜班员终于发现监控时间轴被店长远程覆盖。\n\n【剧终】",
+      usage: { promptTokens: 2, completionTokens: 2, totalTokens: 4 },
+    });
+    chatCompletionMock.mockResolvedValueOnce({
+      content: [
+        "# 监控里没有他",
+        "",
+        "## 人物",
+        "- 夜班员",
+        "- 陌生人",
+        "",
+        "## 剧本正文",
+        "便利店。暴雨。",
+        "陌生人推门。",
+        "夜班员终于发现监控时间轴被店长远程覆盖。",
+        "",
+        "【剧终】",
+      ].join("\n"),
+      usage: { promptTokens: 3, completionTokens: 3, totalTokens: 6 },
+    });
+
+    const result = await runScriptCreation({
+      projectRoot: root,
+      runtime: makeRuntime(root),
+      title: "监控里没有他",
+      instruction: "十分钟单场景现实悬疑短剧。",
+      projectId: "missing-on-camera",
+      episodeCount: 1,
+    });
+
+    expect(chatCompletionMock).toHaveBeenCalledTimes(3);
+    const continuationMessages = chatCompletionMock.mock.calls[1]?.[2] as ReadonlyArray<{
+      role: string;
+      content: string;
+    }>;
+    expect(continuationMessages.at(-2)).toMatchObject({
+      role: "assistant",
+      content: expect.stringContaining("便利店。暴雨。"),
+    });
+    expect(continuationMessages.at(-1)?.content).toContain("只输出缺失的后续内容");
+    const recoveryMessages = chatCompletionMock.mock.calls[2]?.[2] as ReadonlyArray<{
+      role: string;
+      content: string;
+    }>;
+    expect(recoveryMessages[0]?.content).toContain("恢复唯一一份规范生产文档");
+
+    const script = await readFile(join(root, result.scriptPath), "utf-8");
+    expect(script).toContain("便利店。暴雨。");
+    expect(script).toContain("监控时间轴被店长远程覆盖");
+    expect(script.match(/陌生人推门。/gu)).toHaveLength(1);
+    const status = JSON.parse(await readFile(join(root, "dramas/missing-on-camera/status.json"), "utf-8"));
+    expect(status.status).toBe("complete");
+  });
+
+  it("does not commit a script with repeated deliverable sections", async () => {
+    chatCompletionMock.mockReset();
+    chatCompletionMock.mockResolvedValueOnce({
+      content: [
+        "# 重复剧本",
+        "## 人物",
+        "甲",
+        "## 剧本正文",
+        "第一版。",
+        "# 重复剧本",
+        "## 人物",
+        "甲",
+        "## 剧本正文",
+        "第二版。",
+      ].join("\n"),
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+
+    await expect(runScriptCreation({
+      projectRoot: root,
+      runtime: makeRuntime(root),
+      title: "重复剧本",
+      instruction: "写完整剧本。",
+      projectId: "duplicate-script",
+    })).rejects.toThrow("且仅返回一份");
+    await expect(access(join(root, "dramas/duplicate-script/status.json"))).rejects.toThrow();
+  });
+
+  it("does not publish a completed run when the model returns another confirmation instead of a script", async () => {
+    chatCompletionMock.mockReset();
+    chatCompletionMock.mockResolvedValueOnce({
+      content: [
+        "# 停电后的第三声敲门",
+        "",
+        "请选择一个现实解释：",
+        "- A. 邻居敲错门",
+        "- B. 管道传声",
+        "",
+        "请回复字母，确认后再输出完整剧本。",
+      ].join("\n"),
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+
+    await expect(runScriptCreation({
+      projectRoot: root,
+      runtime: makeRuntime(root),
+      title: "停电后的第三声敲门",
+      instruction: "五分钟单场景现实悬疑短剧。",
+      projectId: "third-knock",
+    })).rejects.toThrow("且仅返回一份 `## 人物`");
+
+    await expect(stat(join(root, "dramas/third-knock/script.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(stat(join(root, "dramas/third-knock/status.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("generates large episodic storyboards in complete structural segments", async () => {

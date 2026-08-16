@@ -275,7 +275,7 @@ export class PlayStore {
       currentStateRaw: await this.readOptionalRunFile(worldId, runId, join("state", "current.json")),
       sceneProjection: await this.readOptionalRunFile(worldId, runId, join("projections", "scene.md")),
       stateProjection: await this.readOptionalRunFile(worldId, runId, join("projections", "state.md")),
-      graph: input.graph,
+      graph: structuredClone(input.graph),
     };
   }
 

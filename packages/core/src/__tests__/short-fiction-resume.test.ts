@@ -21,7 +21,7 @@ const DRAFT_MD = `
 ${Array.from({ length: CH }, (_, i) => `=== CHAPTER ${i + 1} TITLE ===
 第${i + 1}章
 === CHAPTER ${i + 1} CONTENT ===
-${"深夜的电梯停在不存在的十三层，门开了。".repeat(20)}`).join("\n")}
+${"深夜的电梯停在不存在的十三层，门开了。".repeat(50)}`).join("\n")}
 `;
 const PARTIAL_DRAFT_MD = `
 === SHORT_FICTION_TITLE ===
@@ -137,7 +137,13 @@ describe("short fiction resume + failure marker (C2)", () => {
       .toContain("model reached the output limit");
     const status = JSON.parse(await readFile(join(root, "shorts", result.storyId, "status.json"), "utf-8"));
     expect(status).toMatchObject({ status: "complete" });
-    expect(status.warning).toContain("outline revision skipped");
+    expect(status.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        metric: "optional-revision",
+        severity: "warning",
+        actual: expect.stringContaining("outline revision skipped"),
+      }),
+    ]));
   });
 
   it("uses the confirmed title as project identity instead of a malformed generated heading", async () => {

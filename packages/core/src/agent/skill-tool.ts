@@ -161,7 +161,12 @@ export function createUseSkillTool(
   };
 }
 
-async function retrieveSkillResources(skillId: string, baseDir: string, query: string) {
+export async function retrieveSkillResources(
+  skillId: string,
+  baseDir: string,
+  query: string,
+  limit = 4,
+) {
   const files = await listSkillTextFiles(baseDir);
   const documents: SearchDocument[] = [];
   for (const path of files) {
@@ -192,7 +197,7 @@ async function retrieveSkillResources(skillId: string, baseDir: string, query: s
   try {
     const scope = `skill:${skillId}`;
     index.replaceScope(scope, documents);
-    return index.search(query, { scope, limit: 4 }).map((hit) => ({
+    return index.search(query, { scope, limit }).map((hit) => ({
       path: String(hit.metadata?.path ?? ""),
       heading: String(hit.metadata?.heading ?? ""),
       body: hit.body,
@@ -203,6 +208,36 @@ async function retrieveSkillResources(skillId: string, baseDir: string, query: s
   } finally {
     index.close();
   }
+}
+
+/**
+ * Production workers receive the skill itself from the host. Resolve the
+ * relevant static reference sections from the actual task text just before a
+ * model call, instead of copying large craft prompts into every pipeline.
+ */
+export async function hydrateActivatedSkillGuidance(
+  activations: ReadonlyArray<ActivatedSkillGuidance> | undefined,
+  query: string,
+): Promise<ReadonlyArray<ActivatedSkillGuidance> | undefined> {
+  if (!activations || activations.length === 0 || !query.trim()) return activations;
+  return Promise.all(activations.map(async (activation) => {
+    if (activation.resources.length > 0 || !activation.skill.baseDir) return activation;
+    const resources = await retrieveSkillResources(
+      activation.skill.id,
+      activation.skill.baseDir,
+      query,
+    );
+    return {
+      skill: activation.skill,
+      resources: resources.map(({ path, heading, body, charStart, charEnd }) => ({
+        path,
+        heading,
+        body,
+        charStart,
+        charEnd,
+      })),
+    };
+  }));
 }
 
 async function listSkillTextFiles(root: string, current = root): Promise<string[]> {

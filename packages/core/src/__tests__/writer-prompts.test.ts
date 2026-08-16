@@ -86,7 +86,6 @@ describe("buildWriterSystemPrompt", () => {
       hardMin: 1600,
       hardMax: 2800,
       countingMode: "zh_chars",
-      normalizeMode: "none",
     });
 
     const prompt = buildWriterSystemPrompt(

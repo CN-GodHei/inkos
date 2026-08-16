@@ -1,4 +1,5 @@
 import type { AgentContext } from "../agents/base.js";
+import { join } from "node:path";
 import {
   PlayActionIntentSchema,
   PlayMutationSchema,
@@ -19,6 +20,11 @@ import { createPlayDB } from "./play-db-factory.js";
 import { applyPlayMutation, seedPlayGraph, type PlayReducerDB } from "./play-reducer.js";
 import { PlayStore, type PlayWorld } from "./play-store.js";
 import type { PlayGraphSnapshot } from "./play-file-db.js";
+import {
+  createProductionRunSnapshot,
+  writeProductionRunSnapshot,
+  type ProductionObservation,
+} from "../production/harness.js";
 
 export interface PlayActionInterpreterLike {
   readonly interpret: (input: {
@@ -228,6 +234,33 @@ export class PlayRunner {
 
     await this.store.ensureRun(this.options.worldId, this.options.runId);
     const turn = (await this.store.readEvents(this.options.worldId, this.options.runId)).length + 1;
+    await this.writeRunStatus(turn, "running", []);
+    try {
+      const result = await this.executeStep(rawInput, turn, options);
+      const observations: ProductionObservation[] = result.mutation.blocked
+        ? [{
+            metric: "play-action",
+            expected: "action advances or meaningfully responds to world state",
+            actual: result.mutation.blockedReason || result.mutation.summary,
+            severity: "info",
+            evidence: result.mutation.blockedReason || result.mutation.summary,
+            repairable: false,
+          }]
+        : [];
+      await this.writeRunStatus(turn, "complete", observations);
+      return result;
+    } catch (error) {
+      const cancelled = this.options.ctx?.signal?.aborted === true;
+      await this.writeRunStatus(turn, cancelled ? "cancelled" : "failed", [], error).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async executeStep(
+    rawInput: string,
+    turn: number,
+    options: { readonly replayContext?: string },
+  ): Promise<PlayStepResult> {
     const world = await this.store.loadWorld(this.options.worldId);
     const language = world?.language ?? "zh";
     const sceneBrief = await this.readOptionalProjection("projections/scene.md");
@@ -279,51 +312,96 @@ export class PlayRunner {
 
     // Commit everything together, only after the scene and graph reconciliation are in hand.
     const beforeGraph = readGraphSnapshot(this.db);
-    if (beforeGraph) {
-      await this.store.saveCheckpoint(
-        this.options.worldId,
-        this.options.runId,
-        await this.store.captureRunSnapshot(this.options.worldId, this.options.runId, {
+    const rollbackSnapshot = beforeGraph && this.db.replaceWithSnapshot
+      ? await this.store.captureRunSnapshot(this.options.worldId, this.options.runId, {
           id: `before-turn-${turn}`,
           turn,
           graph: beforeGraph,
-        }),
-      );
+        })
+      : null;
+    if (rollbackSnapshot) {
+      await this.store.saveCheckpoint(this.options.worldId, this.options.runId, rollbackSnapshot);
     }
-    const applied = applyPlayMutation({
-      db: this.db,
-      mutation: finalMutation,
-      rawInput,
-    });
-    await this.store.appendEvent(this.options.worldId, this.options.runId, applied.event);
-    await this.store.writeProjection(this.options.worldId, this.options.runId, "projections/state.md", finalStateBrief);
-    await this.store.saveCurrentState(this.options.worldId, this.options.runId, {
-      turn,
-      lastEventId: applied.event.id,
-      lastAction: action,
-      lastSummary: finalMutation.summary,
-      timeAdvance: finalMutation.timeAdvance ?? null,
-      blocked: finalMutation.blocked,
-      worldContract: world?.worldContract ?? "",
-      visualContract: world?.visualContract ?? "",
-    });
-    await this.store.writeProjection(this.options.worldId, this.options.runId, "projections/scene.md", `${render.sceneText}\n`);
-    await this.store.appendTranscriptTurn(this.options.worldId, this.options.runId, {
-      role: "user",
-      content: rawInput,
-      timestamp: Date.now(),
-    });
-    await this.store.appendTranscriptTurn(this.options.worldId, this.options.runId, {
-      role: "assistant",
-      content: render.sceneText,
-      timestamp: Date.now(),
-    });
+
+    try {
+      const applied = applyPlayMutation({
+        db: this.db,
+        mutation: finalMutation,
+        rawInput,
+      });
+      await this.store.appendEvent(this.options.worldId, this.options.runId, applied.event);
+      await this.store.writeProjection(this.options.worldId, this.options.runId, "projections/state.md", finalStateBrief);
+      await this.store.saveCurrentState(this.options.worldId, this.options.runId, {
+        turn,
+        lastEventId: applied.event.id,
+        lastAction: action,
+        lastSummary: finalMutation.summary,
+        timeAdvance: finalMutation.timeAdvance ?? null,
+        blocked: finalMutation.blocked,
+        worldContract: world?.worldContract ?? "",
+        visualContract: world?.visualContract ?? "",
+      });
+      await this.store.writeProjection(this.options.worldId, this.options.runId, "projections/scene.md", `${render.sceneText}\n`);
+      await this.store.appendTranscriptTurn(this.options.worldId, this.options.runId, {
+        role: "user",
+        content: rawInput,
+        timestamp: Date.now(),
+      });
+      await this.store.appendTranscriptTurn(this.options.worldId, this.options.runId, {
+        role: "assistant",
+        content: render.sceneText,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      if (!rollbackSnapshot) throw error;
+      try {
+        await this.store.restoreRunSnapshot(
+          this.options.worldId,
+          this.options.runId,
+          rollbackSnapshot,
+          requireRestorableGraphDB(this.db),
+        );
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `Play turn ${turn} failed and rollback was incomplete`);
+      }
+      throw error;
+    }
 
     return {
       ...render,
       action,
       mutation: finalMutation,
     };
+  }
+
+  private async writeRunStatus(
+    turn: number,
+    status: "running" | "complete" | "failed" | "cancelled",
+    observations: ReadonlyArray<ProductionObservation>,
+    error?: unknown,
+  ): Promise<void> {
+    const runDir = join("worlds", this.options.worldId, "runs", this.options.runId);
+    await writeProductionRunSnapshot({
+      rootDir: this.options.projectRoot,
+      runPath: join(runDir, "status.json"),
+      run: createProductionRunSnapshot({
+        kind: "play",
+        id: `${this.options.worldId}:${this.options.runId}`,
+        status,
+        stage: `turn-${turn}`,
+        artifacts: [
+          join(runDir, "events.jsonl"),
+          join(runDir, "transcript.jsonl"),
+          join(runDir, "state", "current.json"),
+          join(runDir, "projections", "scene.md"),
+          join(runDir, "projections", "state.md"),
+        ],
+        observations,
+        skillIds: this.options.ctx?.activatedSkills?.map((activation) => activation.skill.id),
+        resumeCursor: String(turn),
+        ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+      }),
+    });
   }
 
   async regenerateLastTurn(input?: string): Promise<PlayReplayResult> {

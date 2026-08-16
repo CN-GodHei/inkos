@@ -655,17 +655,12 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           get().finalizeStream(sessionId, streamTs, "", toolCall);
           attachResponseTools();
         } else {
-          const message = withToolExecutions({
-            role: "assistant",
-            content: "",
-            timestamp: Date.now(),
-            toolCall,
-          }, responseToolExecutions);
-          set((state) => ({
-            sessions: updateSession(state.sessions, sessionId, (runtime) => ({
-              messages: [...runtime.messages, message],
-            })),
-          }));
+          // A confirmed production task can be restored from task:snapshot before
+          // tool:start arrives. That card uses the server-side startedAt timestamp,
+          // not this request's streamTs, so hasStream is false even though the same
+          // execution is already visible. Always merge by execution id here: it
+          // updates the restored card, or appends one when no SSE event was observed.
+          attachResponseTools();
         }
       } else {
         if (hasStream) {
