@@ -184,6 +184,35 @@ describe("interaction models", () => {
     });
   });
 
+  it("persists TUI surface, model, and structured confirmation state", () => {
+    const session = InteractionSessionSchema.parse({
+      sessionId: "tui-session",
+      projectRoot: "/tmp/project",
+      sessionKind: "interactive-film",
+      modelOverride: "deepseek-v4-pro",
+      automationMode: "semi",
+      messages: [],
+      pendingProposedAction: {
+        action: "interactive_film_create",
+        targetSessionKind: "interactive-film",
+        instruction: "生成三幕互动影游",
+        requestedSkills: ["interactive-film-authoring"],
+        actionPayload: {
+          interactiveFilmCreate: { title: "回声航线", episodeCount: 3 },
+        },
+      },
+    });
+
+    expect(session).toMatchObject({
+      sessionKind: "interactive-film",
+      modelOverride: "deepseek-v4-pro",
+      pendingProposedAction: {
+        action: "interactive_film_create",
+        requestedSkills: ["interactive-film-authoring"],
+      },
+    });
+  });
+
   it("clears pending decisions while keeping the rest of the session intact", () => {
     const session = InteractionSessionSchema.parse({
       sessionId: "session-2",
