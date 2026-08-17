@@ -52,36 +52,17 @@ InkOS 1.8.0 converges the Chat Agent and every production workflow on one pi-age
 - **TUI parity with Studio**: explicit `/new`, `/short`, `/play`, `/cover`, and `/write` surfaces; structured `/confirm` / `/cancel`; session-level `/model`; and adaptive light/dark terminal colors. Ordinary free text still goes to the Agent.
 - **Models and workbench**: LM Studio support, persistent dynamic model catalogs and external canon imports, custom cover Base URLs, wider chapter previews, and a safe chapter rewrite workspace.
 
-## v1.7 Multilingual Creation, Narrative Forecasts, and Non-Blocking Collaboration
+## v1.5-v1.7: Building the Multi-Format Agent Workbench
 
-InkOS 1.7 brings cross-language delivery, long-form forecasting, and continuous collaboration into the same Agent workbench. Translate complete works, compare several non-canonical futures, keep chatting while production runs in the background, or ask Chat to read references, import an existing manuscript, adjust prompts, revise chapters, and safely recover the creative state.
-
-- **Model setup** — Studio includes provider settings, model routing, cover-service settings, [kkaiapi](https://en.kkaiapi.com/) / OpenRouter aggregator entries, and custom OpenAI-compatible endpoints.
-- **Narrative forecasts**: Studio Chat and the CLI can create, re-check, and select 2-5 isolated futures from current canon, comparing chapter beats, character decisions, projected changes, risks, and author-intent alignment. Selecting one saves a plan only; it does not pre-emptively alter prose, foundations, or story state.
-- **Complete translation workbench**: import EPUB, text-based PDF, TXT, and Markdown; translate by chapter and semantic segment; maintain a glossary, generate side-by-side review reports, and export TXT, Markdown, or EPUB. Studio, Chat, and `inkos translate init / run / export` share the same capability.
-- **Native cross-language creation**: short fiction, scripts, storyboards, and interactive-film pipelines now include English-native prompt paths, with matching Studio copy and CLI language fallback rather than a translation-only menu.
-- **Attachments, material library, and editable prompts**: Chat can read text, Markdown, and images; archive and retrieve external references with evidence traces; and inspect or adjust long-form, Play, and interactive-film prompt packs in Studio.
-- **Existing works become real projects**: import chapters from local files, directories, or attachments, reverse-engineer foundation files, and replay chapter state instead of treating a manuscript as temporary context.
-- **Keep chatting while InkOS writes**: production runs in the background while conversation remains available. Tasks can be aborted, failed messages retried, and accurate progress, terminal state, and complete tool cards restored after refresh or restart.
-- **Controllable review, revision, and continuous writing**: strict, lenient, and always revision gates support project- and book-level overrides, with automatic or manual review per book. The CLI adds `inkos auto` and completion/failure notifications, while rejected revisions show before/after metrics and unresolved issues.
-- **Safer creative data and concurrency**: whole-book backup / restore, latest-chapter deletion with state rollback, and synchronized chapter-index counts after patch edits. Stale locks recover, concurrent writes return `BOOK_BUSY`, and completion is grounded only in actual tool results and files.
-- **More reliable models, installation, and cross-platform behavior**: the built-in MiniMax integration separates reasoning from prose by default; dynamic services such as OpenRouter and kkaiapi are not blocked by a static model list; npm packages no longer leak `workspace:*` dependencies; action details, notifications, and project paths are more consistent across platforms.
-
-## v1.6.0 Major Update
-
-v1.6.0 expands InkOS from open-world play into interactive-film authoring, scripts, storyboards, Agent Skills, and traceable research:
-
-- **Interactive film/games**: create branching story graphs, choices, variables/flags, relationship state, endings, node images, and exportable interactive project packages.
-- **Agent Skills**: standard `SKILL.md` packages provide professional guidance and static references. The Chat Agent can invoke a skill from the user's intent, or the user can force one with `@skill-id`.
-- **Traceable web research**: `research_web` creates sourced Markdown reports for worldbuilding, era/profession details, markets, and fact checks. Reports are references only and do not mutate canon or prose by themselves.
-- **Script and storyboard authoring**: Studio Chat can propose script, storyboard, and interactive-film creation actions, confirm them, then save artifacts that can be inspected in Studio.
-- **Reliability fixes**: targeted chapter edits can survive minor model paraphrases; failed multi-chapter audits no longer erase existing chapter indexes; model/provider switching keeps the active book binding.
-
-This release continues the v1.5 direction: heavy actions are confirmable, completion is derived from tool results and files, and story context is governed instead of blindly stuffing every file into the model.
+- **v1.5 · InkOS Play and one interaction surface**: open worlds, branching interaction, character / inventory / evidence / relationship state, and generated images entered Studio. Chat, TUI, and CLI began grounding heavy actions in confirmation and real tool results instead of keyword shortcuts or prose claims.
+- **v1.6 · Interactive film and standard Skills**: scripts, storyboards, multi-ending story graphs, node images, and exportable interactive-film projects arrived alongside standard `SKILL.md` expertise and sourced Web research.
+- **v1.7 · Translation, narrative forecasts, and continuous collaboration**: long-document translation, isolated future-branch comparison, attachments and manuscript import, editable prompts, background production, resumable tasks, and transparent review/revision controls completed the multi-format workbench.
 
 <p align="center">
   <img src="assets/interactive-film-e2e.png" width="900" alt="InkOS interactive-film story graph E2E screenshot">
 </p>
+
+### Core Creation Modes
 
 <p align="center">
   <img src="assets/inkos-short-demo-cover.png" width="210" alt="InkOS Short cover example">
