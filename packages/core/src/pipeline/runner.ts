@@ -61,6 +61,7 @@ import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persi
 import { selectBookReferenceContext } from "../references/reference-context.js";
 import type { ActivatedSkillGuidance } from "../agent/skill-tool.js";
 import { commitAtomicFileSet } from "../utils/atomic-file-set.js";
+import { toPosixPath } from "../utils/posix-path.js";
 import {
   createProductionRunSnapshot,
   createRangeObservation,
@@ -1947,7 +1948,7 @@ export class PipelineRunner {
         wordCount ?? book.chapterWordCount,
         await this.resolveBookLanguage(book),
       );
-      const chapterPath = join("chapters", chapterFile);
+      const chapterPath = toPosixPath(join("chapters", chapterFile));
       const artifacts = [
         chapterPath,
         join("chapters", "index.json"),
@@ -1955,7 +1956,7 @@ export class PipelineRunner {
         join("story", "pending_hooks.md"),
         join("story", "snapshots", String(chapterNumber)),
         join("story", "runtime", `chapter-${paddedChapter}.trace.json`),
-      ];
+      ].map(toPosixPath);
       await writeProductionRunSnapshot({
         rootDir: bookDir,
         runPath,

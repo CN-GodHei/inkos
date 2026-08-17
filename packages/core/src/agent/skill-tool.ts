@@ -9,6 +9,7 @@ import {
   splitMarkdownForSearch,
   type SearchDocument,
 } from "../retrieval/local-search.js";
+import { toPosixPath } from "../utils/posix-path.js";
 
 const MAX_SKILL_RESOURCE_BYTES = 512 * 1024;
 const EXPIRED_SKILL_GUIDANCE = "This skill was used for its original turn only. Its instructions are not active for later turns.";
@@ -244,7 +245,7 @@ async function listSkillTextFiles(root: string, current = root): Promise<string[
   const files: string[] = [];
   for (const entry of await readdir(current, { withFileTypes: true })) {
     const fullPath = join(current, entry.name);
-    const relativePath = relative(root, fullPath);
+    const relativePath = toPosixPath(relative(root, fullPath));
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
       files.push(...await listSkillTextFiles(root, fullPath));
