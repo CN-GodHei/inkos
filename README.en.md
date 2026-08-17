@@ -38,6 +38,20 @@ Thanks to [Kimi](https://www.kimi.com/code/?aff=inkos) for sponsoring this proje
 
 > 💡 **One key for global frontier models** — pair InkOS with [**kkaiapi**](https://en.kkaiapi.com/): an OpenAI-compatible gateway for Claude, GPT, Gemini, DeepSeek, Kimi, Qwen, GLM, and image models. Add it as a custom service with base URL `https://api.kkaiapi.com/v1`, then switch models in Studio without juggling multiple provider accounts.
 
+## v1.8.0 Unified Pi Agent Harness and Professional Creation Kernel
+
+InkOS 1.8.0 converges the Chat Agent and every production workflow on one pi-agent-centered harness. Models understand, propose, and invoke capabilities; InkOS owns confirmation, context, state, atomic persistence, and artifact truth. Long fiction, short fiction, scripts, storyboards, interactive films, Play, and translation keep their own craft methods while sharing execution, retrieval, observation, and recovery infrastructure.
+
+- **One production harness**: Studio Chat, TUI, `inkos interact`, and production workers share the pi-agent tool loop and typed action/result boundary. Existing pipelines are deterministic, interruptible capabilities rather than parallel natural-language decision engines.
+- **15 built-in professional Skills**: dedicated `SKILL.md` packages cover long-form writing/review, commercial shorts, Play, scripts, storyboards, interactive film, translation, analysis, market research, import, covers, and semantic de-slopping. Each medium shares the Skill architecture, not long-form-specific prompts.
+- **Unified local retrieval**: story memory, archived materials, and Skill references use one rebuildable SQLite FTS5 / BM25 projection. Source files remain authoritative and retrieved evidence keeps source locations.
+- **Book-bound references**: imported material can be explicitly bound to a book with intended uses, then retrieved by task instead of injecting every file in full.
+- **Safe chapter workspaces**: prose, state, hooks, and run snapshots are validated in a chapter workspace and committed atomically, preventing state from advancing when prose persistence fails.
+- **Cross-format production consistency**: Short, script, storyboard, interactive-film, Play, and translation runs share snapshots, Skill binding, length observations, cancellation, and recovery while retaining medium-specific state and craft.
+- **More reliable long tasks**: multi-chapter writing runs sequentially as one recoverable task; first-token and stream-idle deadlines, stale-state repair, and atomic file sets reduce passive hangs and partial completion.
+- **TUI parity with Studio**: explicit `/new`, `/short`, `/play`, `/cover`, and `/write` surfaces; structured `/confirm` / `/cancel`; session-level `/model`; and adaptive light/dark terminal colors. Ordinary free text still goes to the Agent.
+- **Models and workbench**: LM Studio support, persistent dynamic model catalogs and external canon imports, custom cover Base URLs, wider chapter previews, and a safe chapter rewrite workspace.
+
 ## v1.7 Multilingual Creation, Narrative Forecasts, and Non-Blocking Collaboration
 
 InkOS 1.7 brings cross-language delivery, long-form forecasting, and continuous collaboration into the same Agent workbench. Translate complete works, compare several non-canonical futures, keep chatting while production runs in the background, or ask Chat to read references, import an existing manuscript, adjust prompts, revise chapters, and safely recover the creative state.
@@ -99,6 +113,8 @@ This release continues the v1.5 direction: heavy actions are confirmable, comple
 ## Quick Start
 
 ### Install
+
+Requires **Node.js 22 or later**.
 
 ```bash
 npm i -g @actalk/inkos
@@ -251,7 +267,7 @@ If a service test fails, first check that the service, model, and protocol match
 
 - **Studio Chat**: discuss, create books, run Short, generate covers, launch Play, and edit persistent files from one chat surface; heavy actions show confirmation cards.
 - **Creation entries**: Long-form Novel, Short Fiction, Fan Fiction, Spinoff, Style Imitation, Continuation, Branching Interactive, and Open World are available as first-class Studio entries.
-- **TUI dashboard**: `inkos tui` opens the terminal full-screen interaction mode for keyboard-first users.
+- **TUI dashboard**: `inkos tui` opens the full-screen terminal interface with `/new`, `/short`, `/play`, `/cover`, `/write`, `/confirm`, `/cancel`, and session-level `/model <name>` commands.
 - **External agent entry**: `inkos interact --json --message "..."` remains the structured entry for OpenClaw and other agents.
 - **Atomic commands remain**: `plan` / `compose` / `draft` / `audit` / `revise` / `write next` still work for scripting and advanced usage.
 
@@ -423,7 +439,7 @@ Model output limits are managed by provider model cards in the provider bank. Re
 
 ## How It Works
 
-InkOS now has two main runtime tracks: long-form / short-form production for deliverable text, and Play for persistent interactive worlds. They share Studio Chat, model configuration, action confirmation, artifact preview, and provider handling, but their state models are different.
+InkOS uses a pi-agent harness as its shared reasoning and tool-call kernel. The Agent interprets user intent and emits typed actions; the host executes deterministic tools, enforces confirmation and permissions, manages state, and derives completion from real files and tool results. Long fiction, short fiction, scripts, storyboards, interactive film, Play, and translation share this architecture while retaining dedicated Skills, state models, and production steps.
 
 <p align="center">
   <img src="assets/arch-system.svg" width="900" alt="System architecture">
