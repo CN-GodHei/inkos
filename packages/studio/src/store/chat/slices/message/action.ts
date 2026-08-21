@@ -14,6 +14,7 @@ import { fetchJson } from "../../../../hooks/use-api";
 import { tr } from "../../../../lib/app-language";
 import { isConfirmedProductionSend } from "../../message-policy";
 import { attachSessionStreamListeners } from "./stream-events";
+import { saveModelSelection } from "../../model-persistence";
 import {
   bookKey,
   createSessionRuntime,
@@ -208,7 +209,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       };
     }),
 
-  setSelectedModel: (model, service) => set({ selectedModel: model, selectedService: service }),
+  setSelectedModel: (model, service) => {
+    set({ selectedModel: model, selectedService: service });
+    saveModelSelection(model, service);
+  },
 
   loadSessionList: async (bookId) => {
     const query = bookId === null ? "null" : encodeURIComponent(bookId);
