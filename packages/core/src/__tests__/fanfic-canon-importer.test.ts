@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { FanficCanonImporter } from "../agents/fanfic-canon-importer.js";
 import type { LLMClient } from "../llm/provider.js";
@@ -13,6 +16,19 @@ const ZERO_USAGE = {
   completionTokens: 0,
   totalTokens: 0,
 } as const;
+
+const SECTIONS_RESPONSE = [
+  "=== SECTION: world_rules ===",
+  "规则 A。",
+  "=== SECTION: character_profiles ===",
+  "（素材中未提取到角色信息）",
+  "=== SECTION: key_events ===",
+  "（素材中未提取到关键事件）",
+  "=== SECTION: power_system ===",
+  "（原作无明确力量体系）",
+  "=== SECTION: writing_style ===",
+  "克制。",
+].join("\n");
 
 describe("FanficCanonImporter", () => {
   it("semantically compiles long source chunks instead of truncating the tail", async () => {
@@ -137,5 +153,71 @@ describe("FanficCanonImporter", () => {
     await agent.importFromText("短文本", "短原作", "canon", (p) => progress.push(p));
 
     expect(progress).toEqual([{ phase: "extracting", done: 1, total: 1 }]);
+  });
+
+  it("resumes an interrupted compile from the persisted chunk cache", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-fanfic-cache-"));
+    const cachePath = join(root, "compile.json");
+    const source = "A".repeat(60_000);
+
+    const first = new FanficCanonImporter({
+      client: TEST_CLIENT,
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+    vi.spyOn(first as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValueOnce({ content: "片段1资料", usage: ZERO_USAGE })
+      .mockRejectedValueOnce(new Error("interrupted"));
+    await expect(first.importFromText(source, "长原作", "canon", undefined, { cachePath })).rejects.toThrow("interrupted");
+
+    const second = new FanficCanonImporter({
+      client: TEST_CLIENT,
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+    const secondChat = vi.spyOn(second as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValueOnce({ content: "片段2资料", usage: ZERO_USAGE })
+      .mockResolvedValueOnce({ content: SECTIONS_RESPONSE, usage: ZERO_USAGE });
+
+    const result = await second.importFromText(source, "长原作", "canon", undefined, { cachePath });
+
+    expect(secondChat).toHaveBeenCalledTimes(2);
+    const chunkTwoMessages = secondChat.mock.calls[0]?.[0] as Array<{ content: string }>;
+    expect(chunkTwoMessages[1]?.content).toContain("片段：2/2");
+    expect(result.chunkCount).toBe(2);
+    expect(result.worldRules).toContain("规则 A。");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("ignores a stale resume cache when the fingerprint changed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-fanfic-cache-"));
+    const cachePath = join(root, "compile.json");
+    const source = "A".repeat(60_000);
+
+    const first = new FanficCanonImporter({
+      client: TEST_CLIENT,
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+    vi.spyOn(first as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValueOnce({ content: "旧片段", usage: ZERO_USAGE })
+      .mockRejectedValueOnce(new Error("stop"));
+    await expect(first.importFromText(source, "长原作", "canon", undefined, { cachePath, fingerprint: "old-fp" }))
+      .rejects.toThrow("stop");
+
+    const second = new FanficCanonImporter({
+      client: TEST_CLIENT,
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+    const secondChat = vi.spyOn(second as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValueOnce({ content: "新片段", usage: ZERO_USAGE })
+      .mockResolvedValueOnce({ content: "新片段", usage: ZERO_USAGE })
+      .mockResolvedValueOnce({ content: SECTIONS_RESPONSE, usage: ZERO_USAGE });
+
+    await second.importFromText(source, "长原作", "canon", undefined, { cachePath, fingerprint: "new-fp" });
+
+    expect(secondChat).toHaveBeenCalledTimes(3);
+    await rm(root, { recursive: true, force: true });
   });
 });

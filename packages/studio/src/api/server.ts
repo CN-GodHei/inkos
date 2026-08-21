@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import { gzipSync } from "node:zlib";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import {
   StateManager,
   PipelineRunner,
@@ -6037,8 +6037,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         purpose: "reference",
       });
       const sourceText = await readFile(join(root, material.markdownPath), "utf-8");
+      const fingerprint = createHash("sha256")
+        .update(await readFile(join(root, body.filePath)))
+        .digest("hex");
       const pipeline = new PipelineRunner(await buildPipelineConfig());
+      let skipped = false;
       await pipeline.importFanficCanon(id, sourceText, material.title, "canon", (progress) => {
+        if (progress.phase === "skipped") skipped = true;
         broadcast("import:progress", {
           bookId: id,
           type: "canon-file",
@@ -6049,10 +6054,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
             ? Math.round((progress.done / progress.total) * 100)
             : undefined,
         });
-      });
+      }, { fingerprint });
       broadcast("import:progress", { bookId: id, type: "canon-file", phase: "done", done: 1, total: 1, percent: 100 });
-      broadcast("import:complete", { bookId: id, type: "canon-file", materialId: material.id });
-      return c.json({ ok: true, material });
+      broadcast("import:complete", { bookId: id, type: "canon-file", materialId: material.id, ...(skipped ? { skipped: true } : {}) });
+      return c.json({ ok: true, material, ...(skipped ? { skipped: true } : {}) });
     } catch (error) {
       broadcast("import:error", { bookId: id, type: "canon-file", error: String(error) });
       return c.json({ error: String(error) }, 500);

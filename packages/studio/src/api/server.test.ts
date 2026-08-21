@@ -6602,6 +6602,7 @@ describe("createStudioServer daemon lifecycle", () => {
       "motherbook",
       "canon",
       expect.any(Function),
+      expect.objectContaining({ fingerprint: expect.any(String) }),
     );
   });
 

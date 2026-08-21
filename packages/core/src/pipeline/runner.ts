@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
 import { createLLMClient } from "../llm/provider.js";
 import { runWorkerAgent } from "../agent/worker-agent.js";
@@ -979,15 +980,50 @@ export class PipelineRunner {
     sourceName: string,
     fanficMode: FanficMode,
     onProgress?: (progress: import("../agents/fanfic-canon-importer.js").FanficImportProgress) => void,
+    options?: {
+      /** Stable content identity (defaults to the source text hash). */
+      readonly fingerprint?: string;
+      /** Skip the unchanged-source shortcut and force a full re-analysis. */
+      readonly force?: boolean;
+    },
   ): Promise<string> {
-    const { FanficCanonImporter } = await import("../agents/fanfic-canon-importer.js");
-    const importer = new FanficCanonImporter(this.agentCtxFor("fanfic-canon-importer", bookId));
-    const result = await importer.importFromText(sourceText, sourceName, fanficMode, onProgress);
+    const fingerprint = options?.fingerprint ?? createHash("sha256").update(sourceText).digest("hex");
 
     const bookDir = this.state.bookDir(bookId);
     const storyDir = join(bookDir, "story");
+    const canonPath = join(storyDir, "fanfic_canon.md");
+    const metaPath = join(storyDir, "fanfic_canon.meta.json");
+
+    // Re-import of the same content is a no-op: reuse the existing canon and
+    // skip every LLM call (the expensive part of a large-source import).
+    if (!options?.force) {
+      const canonExists = await readFile(canonPath, "utf-8").then(() => true).catch(() => false);
+      const existingMeta = await readFile(metaPath, "utf-8")
+        .then((raw) => JSON.parse(raw) as { sourceFingerprint?: string } | null)
+        .catch(() => null);
+      if (canonExists && existingMeta?.sourceFingerprint === fingerprint) {
+        onProgress?.({ phase: "skipped", done: 1, total: 1 });
+        return readFile(canonPath, "utf-8");
+      }
+    }
+
+    const { FanficCanonImporter } = await import("../agents/fanfic-canon-importer.js");
+    const importer = new FanficCanonImporter(this.agentCtxFor("fanfic-canon-importer", bookId));
+    const cachePath = join(storyDir, "runtime", `fanfic-compile-${fingerprint}.json`);
+    const result = await importer.importFromText(sourceText, sourceName, fanficMode, onProgress, {
+      fingerprint,
+      cachePath,
+    });
+
     await mkdir(storyDir, { recursive: true });
-    await writeFile(join(storyDir, "fanfic_canon.md"), result.fullDocument, "utf-8");
+    await writeFile(canonPath, result.fullDocument, "utf-8");
+    await writeFile(metaPath, JSON.stringify({
+      sourceFile: sourceName,
+      sourceFingerprint: fingerprint,
+      importedAt: new Date().toISOString(),
+      chunkCount: result.chunkCount,
+    }, null, 2), "utf-8");
+    try { await rm(cachePath, { force: true }); } catch { /* best-effort */ }
 
     return result.fullDocument;
   }

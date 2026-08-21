@@ -43,6 +43,8 @@ function importPhaseLabel(lang: "zh" | "en", run: ImportRun): string {
       return zh ? `分析导入章节${count}…` : `Analyzing imported chapters${count}…`;
     case "done":
       return zh ? "导入完成" : "Import complete";
+    case "skipped":
+      return zh ? "已导入过（内容未变），跳过分析" : "Already imported (unchanged), skipping analysis";
     case "error":
       return zh ? "导入失败" : "Import failed";
     default:
@@ -174,10 +176,16 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ filename: canonFile.name, dataUrl: await fileToDataUrl(canonFile) }),
         });
-        await postApi(`/books/${canonTarget}/import/canon-file`, {
+        const result = await postApi<{ skipped?: boolean }>(`/books/${canonTarget}/import/canon-file`, {
           filePath: uploaded.storedPath,
           filename: canonFile.name,
         });
+        setActiveRun((prev) => prev ? { ...prev, phase: result?.skipped ? "skipped" : "done", percent: 100 } : prev);
+        setStatus(result?.skipped
+          ? tr("母本内容未变，已跳过重复分析", "Canon unchanged; skipped repeated analysis")
+          : tr("母本导入成功", "Canon imported successfully"));
+        setLoading(false);
+        return;
       }
       setActiveRun((prev) => prev ? { ...prev, phase: "done", percent: 100 } : prev);
       setStatus(tr("母本导入成功", "Canon imported successfully"));

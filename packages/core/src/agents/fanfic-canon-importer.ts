@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { BaseAgent } from "./base.js";
 import type { FanficMode } from "../models/book.js";
 
@@ -8,13 +11,31 @@ export interface FanficCanonOutput {
   readonly powerSystem: string;
   readonly writingStyle: string;
   readonly fullDocument: string;
+  /** Number of source chunks compiled (0 for short sources). */
+  readonly chunkCount: number;
 }
 
 export interface FanficImportProgress {
-  /** "compiling": per-chunk semantic compilation; "extracting": final canon extraction. */
-  readonly phase: "compiling" | "extracting";
+  /**
+   * "compiling": per-chunk semantic compilation; "extracting": final canon
+   * extraction; "skipped": source unchanged since the last successful import.
+   */
+  readonly phase: "compiling" | "extracting" | "skipped";
   readonly done: number;
   readonly total: number;
+}
+
+export interface FanficImportOptions {
+  /** Stable content identity; gates the resume cache. Falls back to sourceText hash. */
+  readonly fingerprint?: string;
+  /** Path to the incremental compile cache used for interrupted-run resume. */
+  readonly cachePath?: string;
+}
+
+interface CompileCacheFile {
+  readonly fingerprint: string;
+  readonly total: number;
+  readonly notes: ReadonlyArray<{ readonly index: number; readonly content: string }>;
 }
 
 const MODE_LABELS: Record<FanficMode, string> = {
@@ -36,8 +57,9 @@ export class FanficCanonImporter extends BaseAgent {
     sourceName: string,
     fanficMode: FanficMode,
     onProgress?: (progress: FanficImportProgress) => void,
+    options?: FanficImportOptions,
   ): Promise<FanficCanonOutput> {
-    const source = await this.prepareSourceText(sourceText, sourceName, onProgress);
+    const source = await this.prepareSourceText(sourceText, sourceName, onProgress, options);
 
     const modeLabel = MODE_LABELS[fanficMode];
 
@@ -149,22 +171,46 @@ ${source.compiled ? "\n注意：原作素材较长。下面输入是逐段读取
       meta,
     ].join("\n");
 
-    return { worldRules, characterProfiles, keyEvents, powerSystem, writingStyle, fullDocument };
+    return {
+      worldRules, characterProfiles, keyEvents, powerSystem, writingStyle, fullDocument,
+      chunkCount: source.chunkCount,
+    };
   }
 
   private async prepareSourceText(
     sourceText: string,
     sourceName: string,
     onProgress?: (progress: FanficImportProgress) => void,
-  ): Promise<{ readonly text: string; readonly compiled: boolean }> {
+    options?: FanficImportOptions,
+  ): Promise<{ readonly text: string; readonly compiled: boolean; readonly chunkCount: number }> {
     if (sourceText.length <= SOURCE_CHUNK_CHARS) {
-      return { text: sourceText, compiled: false };
+      return { text: sourceText, compiled: false, chunkCount: 0 };
     }
 
+    const fingerprint = options?.fingerprint ?? hashText(sourceText);
     const chunks = splitIntoChunks(sourceText, SOURCE_CHUNK_CHARS);
-    const notes: string[] = [];
-    onProgress?.({ phase: "compiling", done: 0, total: chunks.length });
+    const cache = loadCompileCache(options?.cachePath, fingerprint);
+
+    // Restore already-compiled chunks so an interrupted run resumes instead of
+    // re-paying every LLM call from the start.
+    const notes: Array<string | undefined> = new Array(chunks.length);
+    for (const entry of cache.notes) {
+      if (entry.index >= 0 && entry.index < chunks.length) notes[entry.index] = entry.content;
+    }
+    const completedCount = () => notes.filter((note) => note !== undefined).length;
+    const persist = () => {
+      saveCompileCache(options?.cachePath, {
+        fingerprint,
+        total: chunks.length,
+        notes: notes
+          .map((content, index) => (content === undefined ? null : { index, content }))
+          .filter((entry): entry is { index: number; content: string } => entry !== null),
+      });
+    };
+
+    onProgress?.({ phase: "compiling", done: completedCount(), total: chunks.length });
     for (let index = 0; index < chunks.length; index++) {
+      if (notes[index] !== undefined) continue;
       const response = await this.chat(
         [
           {
@@ -189,21 +235,49 @@ ${source.compiled ? "\n注意：原作素材较长。下面输入是逐段读取
       );
       const content = response.content.trim();
       if (content) {
-        notes.push([`## 片段 ${index + 1}/${chunks.length}`, content].join("\n\n"));
+        notes[index] = [`## 片段 ${index + 1}/${chunks.length}`, content].join("\n\n");
       }
-      onProgress?.({ phase: "compiling", done: index + 1, total: chunks.length });
+      persist();
+      onProgress?.({ phase: "compiling", done: completedCount(), total: chunks.length });
     }
 
+    const compiledNotes = notes.filter((note): note is string => note !== undefined);
     return {
       compiled: true,
+      chunkCount: chunks.length,
       text: [
         `# 《${sourceName}》语义资料包`,
         "",
         "以下内容由 InkOS 逐段读取完整原作素材后压缩生成，用于后续正典抽取。它不是原文截断。",
         "",
-        ...notes,
+        ...compiledNotes,
       ].join("\n"),
     };
+  }
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function loadCompileCache(cachePath: string | undefined, fingerprint: string): CompileCacheFile {
+  if (!cachePath) return { fingerprint, total: 0, notes: [] };
+  try {
+    const parsed = JSON.parse(readFileSync(cachePath, "utf-8")) as CompileCacheFile;
+    if (parsed.fingerprint !== fingerprint) return { fingerprint, total: 0, notes: [] };
+    return parsed;
+  } catch {
+    return { fingerprint, total: 0, notes: [] };
+  }
+}
+
+function saveCompileCache(cachePath: string | undefined, cache: CompileCacheFile): void {
+  if (!cachePath) return;
+  try {
+    mkdirSync(dirname(cachePath), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify(cache), "utf-8");
+  } catch {
+    // The cache is an optimization; a failed write must not abort the import.
   }
 }
 

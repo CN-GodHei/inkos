@@ -13,6 +13,7 @@ import { WriterAgent, type SettleChapterStateInput, type WriteChapterOutput } fr
 import { ContinuityAuditor, type AuditIssue, type AuditResult } from "../agents/continuity.js";
 import { ReviserAgent, type ReviseOutput } from "../agents/reviser.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
+import { FanficCanonImporter } from "../agents/fanfic-canon-importer.js";
 import { StateValidatorAgent } from "../agents/state-validator.js";
 import {
   FoundationReviewerAgent,
@@ -3283,6 +3284,45 @@ describe("PipelineRunner", () => {
       expect(await state.loadChapterIndex(bookId)).toEqual([]);
       await expect(readFile(join(state.bookDir(bookId), "story", "fanfic_canon.md"), "utf-8")).resolves.toContain("Fanfic Canon");
       await expect(stat(join(state.bookDir(bookId), "story", "snapshots", "0"))).resolves.toBeTruthy();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses the existing canon when re-importing an unchanged source and re-analyzes on change", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const canon = "# 同人正典（《母本》)\n\n## 世界规则\n规则 A。";
+    const importerSpy = vi.spyOn(FanficCanonImporter.prototype, "importFromText").mockResolvedValue({
+      worldRules: "规则 A。",
+      characterProfiles: "（素材中未提取到角色信息）",
+      keyEvents: "（素材中未提取到关键事件）",
+      powerSystem: "（原作无明确力量体系）",
+      writingStyle: "克制。",
+      fullDocument: canon,
+      chunkCount: 2,
+    });
+
+    try {
+      const source = "A".repeat(60_000);
+      const first = await runner.importFanficCanon(bookId, source, "母本.md", "canon");
+      expect(first).toBe(canon);
+      expect(importerSpy).toHaveBeenCalledTimes(1);
+      const meta = JSON.parse(
+        await readFile(join(state.bookDir(bookId), "story", "fanfic_canon.meta.json"), "utf-8"),
+      ) as { sourceFingerprint: string; chunkCount: number };
+      expect(meta.chunkCount).toBe(2);
+
+      // Same source again: skip every LLM call and reuse the persisted canon.
+      const progresses: Array<{ phase: string }> = [];
+      const second = await runner.importFanficCanon(bookId, source, "母本.md", "canon", (p) => progresses.push(p));
+      expect(second).toBe(canon);
+      expect(importerSpy).toHaveBeenCalledTimes(1);
+      expect(progresses).toContainEqual({ phase: "skipped", done: 1, total: 1 });
+
+      // Changed source (new fingerprint): re-analyze and refresh the meta.
+      const changed = await runner.importFanficCanon(bookId, `${source}X`, "母本.md", "canon");
+      expect(importerSpy).toHaveBeenCalledTimes(2);
+      await expect(readFile(join(state.bookDir(bookId), "story", "fanfic_canon.meta.json"), "utf-8")).resolves.toBeTruthy();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
