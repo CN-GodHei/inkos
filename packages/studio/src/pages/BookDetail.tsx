@@ -27,7 +27,8 @@ import {
   Save,
   Hand,
   Settings2,
-  ArrowUpDown
+  ArrowUpDown,
+  Layers
 } from "lucide-react";
 
 interface ChapterMeta {
@@ -99,6 +100,7 @@ export function BookDetail({
   const c = useColors(theme);
   const { data, loading, error, refetch } = useApi<BookData>(`/books/${bookId}`);
   const [writeRequestPending, setWriteRequestPending] = useState(false);
+  const [batchCount, setBatchCount] = useState(3);
   const [draftRequestPending, setDraftRequestPending] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
@@ -123,6 +125,7 @@ export function BookDetail({
       .catch(() => undefined);
   }, [bookId]);
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
+  const isZh = t("nav.connected") === "\u5DF2\u8FDE\u63A5";
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
   const latestPersistedChapter = data ? data.nextChapter - 1 : 0;
@@ -151,10 +154,10 @@ export function BookDetail({
     }
   }, [bookId, refetch, sse.messages]);
 
-  const handleWriteNext = async () => {
+  const handleWriteNext = async (count: number = 1) => {
     setWriteRequestPending(true);
     try {
-      await postApi(`/books/${bookId}/write-next`);
+      await postApi(`/books/${bookId}/write-next`, { chapterCount: count });
     } catch (e) {
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
@@ -487,13 +490,44 @@ export function BookDetail({
 
         <div className="flex flex-wrap gap-2">
           <button
-            onClick={handleWriteNext}
+            onClick={() => handleWriteNext(1)}
             disabled={writing || drafting}
             className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-primary text-primary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20 disabled:opacity-50"
           >
             {writing ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Zap size={16} />}
             {writing ? t("dash.writing") : t("book.writeNext")}
           </button>
+          <div
+            className="flex items-center gap-1.5 px-2 py-1.5 bg-secondary/60 text-foreground rounded-xl border border-border/50"
+            title={isZh ? "连续写多章（遇 state-degraded 会自动停止）" : "Write several consecutive chapters (stops on state-degraded)"}
+          >
+            <button
+              onClick={() => setBatchCount((v) => Math.max(1, v - 1))}
+              disabled={writing || drafting || batchCount <= 1}
+              className="px-1.5 text-muted-foreground hover:text-primary disabled:opacity-30"
+            >−</button>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={batchCount}
+              onChange={(e) => setBatchCount(Math.min(20, Math.max(1, Number(e.target.value) || 1)))}
+              className="w-12 bg-transparent text-center text-sm font-bold outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            />
+            <button
+              onClick={() => setBatchCount((v) => Math.min(20, v + 1))}
+              disabled={writing || drafting || batchCount >= 20}
+              className="px-1.5 text-muted-foreground hover:text-primary disabled:opacity-30"
+            >+</button>
+            <button
+              onClick={() => handleWriteNext(batchCount)}
+              disabled={writing || drafting}
+              className="ml-0.5 flex items-center gap-1 px-3 py-1.5 text-sm font-bold bg-primary/15 text-primary rounded-lg hover:bg-primary hover:text-primary-foreground transition-all disabled:opacity-50"
+            >
+              {writing ? <div className="w-3.5 h-3.5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" /> : <Layers size={14} />}
+              {isZh ? `连写 ${batchCount} 章` : `Write ${batchCount}`}
+            </button>
+          </div>
           <button
             onClick={handleDraft}
             disabled={writing || drafting}

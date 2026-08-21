@@ -3297,22 +3297,58 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.post("/api/v1/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number }>().catch(() => ({ wordCount: undefined }));
+    const body = await c.req.json<{ wordCount?: number; chapterCount?: number }>()
+      .catch(() => ({ wordCount: undefined, chapterCount: undefined }));
+    const chapterCount = Math.floor(Number(body.chapterCount) || 1);
+    const clamped = Math.min(Math.max(chapterCount, 1), 20);
 
-    broadcast("write:start", { bookId: id });
+    broadcast("write:start", { bookId: id, chapterCount: clamped });
 
     // Fire and forget — progress/completion/errors pushed via SSE
     const pipeline = new PipelineRunner(await buildPipelineConfig({ bookIdForSettings: id }));
-    pipeline.writeNextChapter(id, body.wordCount).then(
-      (result) => {
-        broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
-      },
-      (e) => {
-        broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
-      },
-    );
+    if (clamped > 1) {
+      pipeline.writeChapters(id, clamped, {
+        wordCount: body.wordCount,
+        onChapterComplete(result, completedCount, totalCount) {
+          broadcast("write:complete", {
+            bookId: id,
+            chapterNumber: result.chapterNumber,
+            status: result.status,
+            title: result.title,
+            wordCount: result.wordCount,
+            completedCount,
+            totalCount,
+          });
+        },
+      }).then(
+        (results) => {
+          const last = results.at(-1);
+          const stopped = last && last.status !== "ready-for-review";
+          broadcast("write-batch:complete", {
+            bookId: id,
+            completedCount: results.length,
+            requestedCount: clamped,
+            ...(stopped && last
+              ? { stoppedStatus: last.status, stoppedChapter: last.chapterNumber }
+              : {}),
+          });
+        },
+        (e) => {
+          broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
+        },
+      );
+    } else {
+      pipeline.writeNextChapter(id, body.wordCount).then(
+        (result) => {
+          broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount, completedCount: 1, totalCount: 1 });
+        },
+        (e) => {
+          broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
+        },
+      );
+    }
 
-    return c.json({ status: "writing", bookId: id });
+    return c.json({ status: "writing", bookId: id, chapterCount: clamped });
   });
 
   app.post("/api/v1/books/:id/draft", async (c) => {

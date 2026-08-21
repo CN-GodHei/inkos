@@ -6447,6 +6447,44 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(pipelineConfigs.at(-1)).toMatchObject({ chapterReviewMode: "manual" });
   });
 
+  it("writes multiple chapters through writeChapters when chapterCount > 1 is supplied", async () => {
+    await writeCompleteBookFixture(root, "demo-book", "Demo Book");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    writeChaptersMock.mockResolvedValue([
+      { chapterNumber: 3, title: "Ch3", wordCount: 100, revised: false, status: "ready-for-review", auditResult: { passed: true, issues: [], summary: "" } },
+      { chapterNumber: 4, title: "Ch4", wordCount: 100, revised: false, status: "ready-for-review", auditResult: { passed: true, issues: [], summary: "" } },
+    ]);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chapterCount: 2 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", chapterCount: 2 });
+    expect(writeChaptersMock).toHaveBeenCalledWith(
+      "demo-book",
+      2,
+      expect.objectContaining({ wordCount: undefined }),
+    );
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps writing a single chapter when chapterCount is omitted or 1", async () => {
+    await writeCompleteBookFixture(root, "demo-book", "Demo Book");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/write-next", { method: "POST" });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: "writing", chapterCount: 1 });
+    expect(writeNextChapterMock).toHaveBeenCalledWith("demo-book", undefined);
+    expect(writeChaptersMock).not.toHaveBeenCalled();
+  });
+
   it("uses a book-level revisionGate override when revising a chapter", async () => {
     await writeCompleteBookFixture(root, "demo-book", "Demo Book");
     const rawBookPath = join(root, "books", "demo-book", "book.json");
