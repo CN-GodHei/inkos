@@ -978,10 +978,11 @@ export class PipelineRunner {
     sourceText: string,
     sourceName: string,
     fanficMode: FanficMode,
+    onProgress?: (progress: import("../agents/fanfic-canon-importer.js").FanficImportProgress) => void,
   ): Promise<string> {
     const { FanficCanonImporter } = await import("../agents/fanfic-canon-importer.js");
     const importer = new FanficCanonImporter(this.agentCtxFor("fanfic-canon-importer", bookId));
-    const result = await importer.importFromText(sourceText, sourceName, fanficMode);
+    const result = await importer.importFromText(sourceText, sourceName, fanficMode, onProgress);
 
     const bookDir = this.state.bookDir(bookId);
     const storyDir = join(bookDir, "story");

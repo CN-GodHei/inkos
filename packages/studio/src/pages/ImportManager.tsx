@@ -3,9 +3,10 @@ import { fetchJson, invalidateApiPaths, useApi, postApi } from "../hooks/use-api
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useI18n } from "../hooks/use-i18n";
+import { useSSE } from "../hooks/use-sse";
 import { useColors } from "../hooks/use-colors";
 import { tr } from "../lib/app-language";
-import { FileInput, BookCopy, Feather, BookMarked, Upload, Wand2 } from "lucide-react";
+import { FileInput, BookCopy, Feather, BookMarked, Upload, Wand2, Loader2 } from "lucide-react";
 import { waitForStudioBookReady } from "../lib/book-ready";
 
 interface BookSummary {
@@ -16,6 +17,38 @@ interface BookSummary {
 interface Nav { toDashboard: () => void; toBook: (bookId: string) => void }
 
 type Tab = "chapters" | "canon" | "fanfic" | "spinoff" | "imitation";
+
+interface ImportRun {
+  readonly bookId: string;
+  readonly type: string;
+  readonly phase: string;
+  readonly done?: number;
+  readonly total?: number;
+  readonly percent?: number;
+}
+
+function importPhaseLabel(lang: "zh" | "en", run: ImportRun): string {
+  const zh = lang === "zh";
+  const count = run.total && run.total > 0 && run.done !== undefined ? ` ${run.done}/${run.total}` : "";
+  switch (run.phase) {
+    case "reading":
+      return zh ? "读取源文件…" : "Reading source file…";
+    case "compiling":
+      return zh ? `编译素材${count}…` : `Compiling source${count}…`;
+    case "extracting":
+      return zh ? "抽取正典…" : "Extracting canon…";
+    case "extracting-canon":
+      return zh ? "生成正典参照…" : "Generating canon reference…";
+    case "analyzing":
+      return zh ? `分析导入章节${count}…` : `Analyzing imported chapters${count}…`;
+    case "done":
+      return zh ? "导入完成" : "Import complete";
+    case "error":
+      return zh ? "导入失败" : "Import failed";
+    default:
+      return zh ? "导入中…" : "Importing…";
+  }
+}
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -30,9 +63,11 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
   const c = useColors(theme);
   const { lang } = useI18n();
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
+  const { messages } = useSSE();
   const [tab, setTab] = useState<Tab>(initialTab ?? "chapters");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
+  const [activeRun, setActiveRun] = useState<ImportRun | null>(null);
 
   // Chapters state
   const [chText, setChText] = useState("");
@@ -71,18 +106,49 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
     }
   }, [initialTab]);
 
+  useEffect(() => {
+    if (!activeRun) return;
+    for (const message of messages) {
+      if (message.event !== "import:progress") continue;
+      const data = message.data as { bookId?: string; type?: string; phase?: string; done?: number; total?: number; percent?: number } | null;
+      if (!data || data.bookId !== activeRun.bookId) continue;
+      if (data.type && data.type !== activeRun.type) continue;
+      setActiveRun((prev) => prev ? {
+        ...prev,
+        phase: data.phase ?? prev.phase,
+        done: data.done,
+        total: data.total,
+        percent: data.percent,
+      } : prev);
+    }
+    for (const message of messages) {
+      if (message.event !== "import:complete" && message.event !== "import:error") continue;
+      const data = message.data as { bookId?: string; type?: string } | null;
+      if (!data || data.bookId !== activeRun.bookId) continue;
+      if (data.type && data.type !== activeRun.type) continue;
+      setActiveRun((prev) => prev ? {
+        ...prev,
+        phase: message.event === "import:complete" ? "done" : "error",
+        percent: 100,
+      } : prev);
+    }
+  }, [activeRun, messages]);
+
   const handleImportChapters = async () => {
     if (!chText.trim() || !chBookId) return;
     setLoading(true);
     setStatus("");
+    setActiveRun({ bookId: chBookId, type: "chapters", phase: "analyzing", done: 0, total: 1 });
     try {
       const data = await fetchJson<{ importedCount?: number }>(`/books/${chBookId}/import/chapters`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: chText, splitRegex: chSplitRegex || undefined }),
       });
+      setActiveRun((prev) => prev ? { ...prev, phase: "done", percent: 100 } : prev);
       setStatus(`Imported ${data.importedCount} chapters`);
     } catch (e) {
+      setActiveRun((prev) => prev ? { ...prev, phase: "error" } : prev);
       setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
     setLoading(false);
@@ -92,6 +158,13 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
     if (!canonTarget || (canonSourceType === "book" ? !canonFrom : !canonFile)) return;
     setLoading(true);
     setStatus("");
+    setActiveRun({
+      bookId: canonTarget,
+      type: canonSourceType === "book" ? "canon" : "canon-file",
+      phase: canonSourceType === "book" ? "extracting-canon" : "reading",
+      done: 0,
+      total: 1,
+    });
     try {
       if (canonSourceType === "book") {
         await postApi(`/books/${canonTarget}/import/canon`, { fromBookId: canonFrom });
@@ -106,8 +179,10 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
           filename: canonFile.name,
         });
       }
+      setActiveRun((prev) => prev ? { ...prev, phase: "done", percent: 100 } : prev);
       setStatus(tr("母本导入成功", "Canon imported successfully"));
     } catch (e) {
+      setActiveRun((prev) => prev ? { ...prev, phase: "error" } : prev);
       setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
     setLoading(false);
@@ -382,6 +457,28 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
               {loading ? t("import.creating") : t("import.imitation")}
             </button>
           </>
+        )}
+
+        {activeRun && loading && activeRun.phase !== "done" && activeRun.phase !== "error" && (
+          <div className="space-y-1.5 rounded-lg border border-border bg-secondary/20 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 size={14} className="animate-spin text-primary" />
+              <span>{importPhaseLabel(lang, activeRun)}</span>
+              {activeRun.percent !== undefined && activeRun.percent >= 0 && (
+                <span className="ml-auto font-mono text-xs text-muted-foreground">{activeRun.percent}%</span>
+              )}
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary/50">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-300"
+                style={{
+                  width: activeRun.percent !== undefined
+                    ? `${Math.min(100, Math.max(0, activeRun.percent))}%`
+                    : "35%",
+                }}
+              />
+            </div>
+          </div>
         )}
 
         {status && (

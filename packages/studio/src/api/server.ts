@@ -5976,8 +5976,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       const { splitChapters } = await import("@actalk/inkos-core");
       const chapters = [...splitChapters(text, splitRegex)];
 
+      broadcast("import:progress", { bookId: id, type: "chapters", phase: "analyzing", done: 0, total: chapters.length || 1 });
       const pipeline = new PipelineRunner(await buildPipelineConfig());
       const result = await pipeline.importChapters({ bookId: id, chapters });
+      broadcast("import:progress", { bookId: id, type: "chapters", phase: "done", done: result.importedCount, total: chapters.length || 1, percent: 100 });
       broadcast("import:complete", { bookId: id, type: "chapters", count: result.importedCount });
       return c.json(result);
     } catch (e) {
@@ -5996,7 +5998,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     broadcast("import:start", { bookId: id, type: "canon" });
     try {
       const pipeline = new PipelineRunner(await buildPipelineConfig());
+      broadcast("import:progress", { bookId: id, type: "canon", phase: "extracting-canon", done: 0, total: 1 });
       await pipeline.importCanon(id, fromBookId);
+      broadcast("import:progress", { bookId: id, type: "canon", phase: "done", done: 1, total: 1, percent: 100 });
       broadcast("import:complete", { bookId: id, type: "canon" });
       return c.json({ ok: true });
     } catch (e) {
@@ -6024,6 +6028,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     broadcast("import:start", { bookId: id, type: "canon-file" });
     try {
       await state.loadBookConfig(id);
+      broadcast("import:progress", { bookId: id, type: "canon-file", phase: "reading", done: 0, total: 1 });
       const material = await ingestMaterial(root, {
         sourceKind: "file",
         filePath: body.filePath,
@@ -6033,7 +6038,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       });
       const sourceText = await readFile(join(root, material.markdownPath), "utf-8");
       const pipeline = new PipelineRunner(await buildPipelineConfig());
-      await pipeline.importFanficCanon(id, sourceText, material.title, "canon");
+      await pipeline.importFanficCanon(id, sourceText, material.title, "canon", (progress) => {
+        broadcast("import:progress", {
+          bookId: id,
+          type: "canon-file",
+          phase: progress.phase,
+          done: progress.done,
+          total: progress.total,
+          percent: progress.phase === "compiling" && progress.total > 0
+            ? Math.round((progress.done / progress.total) * 100)
+            : undefined,
+        });
+      });
+      broadcast("import:progress", { bookId: id, type: "canon-file", phase: "done", done: 1, total: 1, percent: 100 });
       broadcast("import:complete", { bookId: id, type: "canon-file", materialId: material.id });
       return c.json({ ok: true, material });
     } catch (error) {

@@ -65,4 +65,77 @@ describe("FanficCanonImporter", () => {
     expect(finalMessages[0]?.content).not.toContain("已截断");
     expect(result.worldRules).toContain("TAIL_CANON_MARKER");
   });
+
+  it("reports chunk-compilation and final-extraction progress via the callback", async () => {
+    const agent = new FanficCanonImporter({
+      client: TEST_CLIENT,
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const chatSpy = vi.spyOn(
+      agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> },
+      "chat",
+    )
+      .mockResolvedValue({ content: "片段资料", usage: ZERO_USAGE })
+      .mockResolvedValueOnce({
+        content: [
+          "=== SECTION: world_rules ===",
+          "规则 A。",
+          "=== SECTION: character_profiles ===",
+          "（素材中未提取到角色信息）",
+          "=== SECTION: key_events ===",
+          "（素材中未提取到关键事件）",
+          "=== SECTION: power_system ===",
+          "（原作无明确力量体系）",
+          "=== SECTION: writing_style ===",
+          "克制。",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    const progress: Array<{ phase: string; done: number; total: number }> = [];
+    const source = `${"前段".repeat(30_000)}`;
+    await agent.importFromText(source, "长原作", "canon", (p) => progress.push(p));
+
+    expect(chatSpy.mock.calls.length).toBe(3);
+    expect(progress).toEqual([
+      { phase: "compiling", done: 0, total: 2 },
+      { phase: "compiling", done: 1, total: 2 },
+      { phase: "compiling", done: 2, total: 2 },
+      { phase: "extracting", done: 1, total: 1 },
+    ]);
+  });
+
+  it("emits only the final extraction progress for short sources", async () => {
+    const agent = new FanficCanonImporter({
+      client: TEST_CLIENT,
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    vi.spyOn(
+      agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> },
+      "chat",
+    ).mockResolvedValue({
+      content: [
+        "=== SECTION: world_rules ===",
+        "规则 A。",
+        "=== SECTION: character_profiles ===",
+        "（素材中未提取到角色信息）",
+        "=== SECTION: key_events ===",
+        "（素材中未提取到关键事件）",
+        "=== SECTION: power_system ===",
+        "（原作无明确力量体系）",
+        "=== SECTION: writing_style ===",
+        "克制。",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    const progress: Array<{ phase: string; done: number; total: number }> = [];
+    await agent.importFromText("短文本", "短原作", "canon", (p) => progress.push(p));
+
+    expect(progress).toEqual([{ phase: "extracting", done: 1, total: 1 }]);
+  });
 });

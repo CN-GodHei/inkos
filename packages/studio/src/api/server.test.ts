@@ -6601,8 +6601,108 @@ describe("createStudioServer daemon lifecycle", () => {
       expect.stringContaining("林舟在旧码头发现了母本中的关键规则"),
       "motherbook",
       "canon",
+      expect.any(Function),
     );
   });
+
+  it("broadcasts import:progress while importing an external canon file", async () => {
+    loadBookConfigMock.mockResolvedValue({ id: "demo-book", fanficMode: "canon" });
+    importFanficCanonMock.mockImplementation(async (
+      _bookId: string,
+      _text: string,
+      _name: string,
+      _mode: string,
+      onProgress?: (p: { phase: string; done: number; total: number }) => void,
+    ) => {
+      onProgress?.({ phase: "compiling", done: 1, total: 3 });
+      onProgress?.({ phase: "compiling", done: 3, total: 3 });
+      onProgress?.({ phase: "extracting", done: 1, total: 1 });
+      return "# 同人正典\n";
+    });
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const sseResponse = await app.request("http://localhost/api/v1/events");
+    const sseEvents: Array<{ event: string; data: Record<string, unknown> | null }> = [];
+    const sseReader = sseResponse.body!.getReader();
+    const ssePump = (async () => {
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        for (;;) {
+          const { done, value } = await sseReader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let frameEnd = buffer.indexOf("\n\n");
+          while (frameEnd !== -1) {
+            const lines = buffer.slice(0, frameEnd).split("\n");
+            buffer = buffer.slice(frameEnd + 2);
+            const eventName = lines.find((line) => line.startsWith("event:"))?.slice("event:".length).trim();
+            const dataRaw = lines.find((line) => line.startsWith("data:"))?.slice("data:".length).trim();
+            if (eventName) {
+              sseEvents.push({ event: eventName, data: dataRaw ? JSON.parse(dataRaw) as Record<string, unknown> : null });
+            }
+            frameEnd = buffer.indexOf("\n\n");
+          }
+        }
+      } catch { /* abort path */ }
+    })();
+    await vi.waitFor(() => expect(sseEvents.some((entry) => entry.event === "ping")).toBe(true));
+
+    const source = "# 第一章\n\n林舟在旧码头发现了母本中的关键规则。";
+    const upload = await app.request("http://localhost/api/v1/import/canon/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: "motherbook.md",
+        dataUrl: `data:text/markdown;base64,${Buffer.from(source).toString("base64")}`,
+      }),
+    });
+    const uploaded = await upload.json() as { storedPath: string };
+
+    const imported = await app.request("http://localhost/api/v1/books/demo-book/import/canon-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filePath: uploaded.storedPath, filename: "motherbook.md" }),
+    });
+    expect(imported.status).toBe(200);
+
+    await vi.waitFor(() => expect(sseEvents.some((entry) => entry.event === "import:progress")).toBe(true));
+    const compileEvent = await vi.waitFor(() => {
+      const found = sseEvents.find((entry) =>
+        entry.event === "import:progress" && entry.data?.phase === "compiling" && entry.data?.done === 1);
+      expect(found).toBeDefined();
+      return found;
+    });
+    expect(compileEvent!.data).toMatchObject({
+      bookId: "demo-book",
+      type: "canon-file",
+      phase: "compiling",
+      done: 1,
+      total: 3,
+      percent: 33,
+    });
+    const extractingEvent = await vi.waitFor(() => {
+      const found = sseEvents.find((entry) => entry.event === "import:progress" && entry.data?.phase === "extracting");
+      expect(found).toBeDefined();
+      return found;
+    });
+    expect(extractingEvent!.data).toMatchObject({
+      bookId: "demo-book",
+      phase: "extracting",
+    });
+    expect(extractingEvent!.data?.percent).toBeUndefined();
+    const doneEvent = await vi.waitFor(() => {
+      const found = sseEvents.find((entry) => entry.event === "import:progress" && entry.data?.phase === "done");
+      expect(found).toBeDefined();
+      return found;
+    });
+    expect(doneEvent!.data).toMatchObject({ bookId: "demo-book", percent: 100 });
+    await vi.waitFor(() => expect(sseEvents.some((entry) => entry.event === "import:complete")).toBe(true));
+
+    await sseReader.cancel();
+    await ssePump;
+  }, 60_000);
 
   it("spinoff/init validates input, 404s a missing parent, and otherwise runs initSpinoffBook", async () => {
     const { createStudioServer } = await import("./server.js");

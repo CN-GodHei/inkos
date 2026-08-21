@@ -10,6 +10,13 @@ export interface FanficCanonOutput {
   readonly fullDocument: string;
 }
 
+export interface FanficImportProgress {
+  /** "compiling": per-chunk semantic compilation; "extracting": final canon extraction. */
+  readonly phase: "compiling" | "extracting";
+  readonly done: number;
+  readonly total: number;
+}
+
 const MODE_LABELS: Record<FanficMode, string> = {
   canon: "原作向（严格遵守原作设定）",
   au: "AU/平行世界（世界规则可改，角色保留）",
@@ -28,8 +35,9 @@ export class FanficCanonImporter extends BaseAgent {
     sourceText: string,
     sourceName: string,
     fanficMode: FanficMode,
+    onProgress?: (progress: FanficImportProgress) => void,
   ): Promise<FanficCanonOutput> {
-    const source = await this.prepareSourceText(sourceText, sourceName);
+    const source = await this.prepareSourceText(sourceText, sourceName, onProgress);
 
     const modeLabel = MODE_LABELS[fanficMode];
 
@@ -95,6 +103,7 @@ ${source.compiled ? "\n注意：原作素材较长。下面输入是逐段读取
       ],
       { temperature: 0.3 },
     );
+    onProgress?.({ phase: "extracting", done: 1, total: 1 });
 
     const content = response.content;
     const extract = (tag: string): string => {
@@ -143,13 +152,18 @@ ${source.compiled ? "\n注意：原作素材较长。下面输入是逐段读取
     return { worldRules, characterProfiles, keyEvents, powerSystem, writingStyle, fullDocument };
   }
 
-  private async prepareSourceText(sourceText: string, sourceName: string): Promise<{ readonly text: string; readonly compiled: boolean }> {
+  private async prepareSourceText(
+    sourceText: string,
+    sourceName: string,
+    onProgress?: (progress: FanficImportProgress) => void,
+  ): Promise<{ readonly text: string; readonly compiled: boolean }> {
     if (sourceText.length <= SOURCE_CHUNK_CHARS) {
       return { text: sourceText, compiled: false };
     }
 
     const chunks = splitIntoChunks(sourceText, SOURCE_CHUNK_CHARS);
     const notes: string[] = [];
+    onProgress?.({ phase: "compiling", done: 0, total: chunks.length });
     for (let index = 0; index < chunks.length; index++) {
       const response = await this.chat(
         [
@@ -177,6 +191,7 @@ ${source.compiled ? "\n注意：原作素材较长。下面输入是逐段读取
       if (content) {
         notes.push([`## 片段 ${index + 1}/${chunks.length}`, content].join("\n\n"));
       }
+      onProgress?.({ phase: "compiling", done: index + 1, total: chunks.length });
     }
 
     return {
