@@ -795,7 +795,7 @@ const SubAgentParams = Type.Object({
     Type.Literal("reviser"),
     Type.Literal("exporter"),
   ]),
-  instruction: Type.String({ description: "Natural language instruction for the sub-agent. For reviser, this is passed as the one-off revision brief." }),
+  instruction: Type.Optional(Type.String({ description: "Natural language instruction for the sub-agent. Required for architect/writer/reviser; for reviser this is passed as the one-off revision brief. Auditor and exporter do not need it." })),
   bookId: Type.Optional(Type.String({
     description: "Optional book ID. In active-book sessions, omit it to use the current active book; if provided, it must match the current active book. For architect creation, this optionally sets the new book ID.",
   })),
@@ -971,6 +971,22 @@ export function createSubAgentTool(
             );
           }
 
+          // writer / architect / reviser drive their work off the instruction;
+          // auditor and exporter only need the chapter number / book id. Enforce
+          // the required field here so a missing instruction surfaces a clear
+          // message instead of a generic schema error, while auditor/exporter
+          // keep working without it.
+          if (
+            (agent === "writer" || agent === "architect" || agent === "reviser")
+            && (typeof instruction !== "string" || instruction.trim().length === 0)
+          ) {
+            return textResult(
+              sessionIsZh
+                ? `Error: ${agent} 需要一条 instruction 指令来描述要做什么。`
+                : `Error: ${agent} requires an instruction describing what to do.`,
+            );
+          }
+
           switch (agent) {
             case "architect": {
             const createBookPayload = options.actionPayload?.createBook;
@@ -984,7 +1000,7 @@ export function createSubAgentTool(
                 pipeline,
                 _signal,
                 activatedSkills,
-                () => pipeline.reviseFoundation(targetBookId, feedback ?? instruction),
+                () => pipeline.reviseFoundation(targetBookId, feedback ?? instruction!),
               );
               progress(`Foundation revised for "${targetBookId}".`);
               return textResult(

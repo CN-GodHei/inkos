@@ -190,6 +190,27 @@ describe("auditor agent — rich return value", () => {
     expect(text).toContain("[critical]");
     expect(text).toContain("Pacing too fast");
   });
+
+  it("audits without an instruction — instruction is not required for auditor", async () => {
+    const auditDraftMock = vi.fn(async () => ({
+      chapterNumber: 6, passed: true, issues: [],
+    }));
+    const tool = createSubAgentTool(withAgentContext({ auditDraft: auditDraftMock }) as any, "my-book");
+    const result = await tool.execute("tc1", { agent: "auditor", bookId: "my-book", chapterNumber: 6 });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("PASSED");
+    expect(auditDraftMock).toHaveBeenCalledWith("my-book", 6);
+  });
+
+  it("rejects writer without an instruction with a clear message", async () => {
+    const writeNextChapterMock = vi.fn(async () => ({}));
+    const tool = createSubAgentTool(withAgentContext({ writeNextChapter: writeNextChapterMock }) as any, "my-book");
+    const result = await tool.execute("tc1", { agent: "writer", bookId: "my-book" });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("writer");
+    expect(text).toMatch(/instruction/i);
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("reviser agent — mode field", () => {
