@@ -72,7 +72,7 @@ export async function buildExportArtifact(
     : index;
 
   if (chapters.length === 0) {
-    throw new Error("No chapters to export.");
+    throw new Error("暂无章节可导出");
   }
 
   const bookDir = state.bookDir(bookId);
