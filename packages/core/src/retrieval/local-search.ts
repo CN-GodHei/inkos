@@ -31,12 +31,14 @@ export interface MarkdownSearchSegment {
  */
 export class LocalSearchIndex {
   private readonly db: DatabaseSync;
+  private readonly ftsEnabled: boolean;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
+    this.ftsEnabled = probeFts5(this.db);
     this.migrate();
   }
 
@@ -99,6 +101,9 @@ export class LocalSearchIndex {
     readonly kinds?: ReadonlyArray<string>;
     readonly limit?: number;
   }): SearchHit[] {
+    if (!this.ftsEnabled) {
+      return this.searchWithLike(query, options);
+    }
     const match = buildMatchQuery(query);
     if (!match) return [];
     const kinds = [...new Set(options.kinds ?? [])];
@@ -146,6 +151,87 @@ export class LocalSearchIndex {
     }));
   }
 
+  /**
+   * Fallback lexical search for node:sqlite builds without the FTS5 module.
+   * Filters candidates with LIKE over the tokenized projection and ranks them
+   * in JS (title hits weigh more than body hits). Results are comparable to
+   * the FTS5 bm25 path: higher score means a better match.
+   */
+  private searchWithLike(query: string, options: {
+    readonly scope: string;
+    readonly kinds?: ReadonlyArray<string>;
+    readonly limit?: number;
+  }): SearchHit[] {
+    const tokens = [...new Set(tokenizeSearchText(query))].slice(0, 64);
+    if (tokens.length === 0) return [];
+    const kinds = [...new Set(options.kinds ?? [])];
+    const kindFilter = kinds.length > 0
+      ? ` AND d.kind IN (${kinds.map(() => "?").join(", ")})`
+      : "";
+    const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 24)));
+    const likeParams: string[] = [];
+    const likeClauses = tokens.map((token) => {
+      const pattern = `%${escapeLike(token)}%`;
+      likeParams.push(pattern, pattern);
+      return `(d.title_tokens LIKE ? ESCAPE '\\' OR d.body_tokens LIKE ? ESCAPE '\\')`;
+    });
+    const rows = this.db.prepare(`
+      SELECT
+        d.document_id AS id,
+        d.scope,
+        d.kind,
+        d.source,
+        d.title,
+        d.body,
+        d.metadata_json AS metadataJson,
+        d.title_tokens AS titleTokens,
+        d.body_tokens AS bodyTokens
+      FROM retrieval_documents d
+      WHERE d.scope = ?${kindFilter}
+        AND (${likeClauses.join(" OR ")})
+      ORDER BY d.document_id ASC
+      LIMIT 500
+    `).all(options.scope, ...kinds, ...likeParams) as unknown as ReadonlyArray<{
+      readonly id: string;
+      readonly scope: string;
+      readonly kind: string;
+      readonly source: string;
+      readonly title: string;
+      readonly body: string;
+      readonly metadataJson: string;
+      readonly titleTokens: string;
+      readonly bodyTokens: string;
+    }>;
+
+    const scored = rows
+      .map((row) => {
+        const titleSet = new Set(row.titleTokens.split(" ").filter(Boolean));
+        const bodySet = new Set(row.bodyTokens.split(" ").filter(Boolean));
+        let score = 0;
+        for (const token of tokens) {
+          if (titleSet.has(token)) score += 4;
+          else if (bodySet.has(token)) score += 1;
+        }
+        return { row, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) =>
+        right.score - left.score
+        || left.row.id.localeCompare(right.row.id))
+      .slice(0, limit);
+
+    return scored.map(({ row, score }) => ({
+      id: row.id,
+      scope: row.scope,
+      kind: row.kind,
+      source: row.source,
+      title: row.title,
+      body: row.body,
+      metadata: parseMetadata(row.metadataJson),
+      score,
+    }));
+  }
+
   close(): void {
     this.db.close();
   }
@@ -170,7 +256,23 @@ export class LocalSearchIndex {
 
       CREATE INDEX IF NOT EXISTS idx_retrieval_documents_scope_kind
         ON retrieval_documents(scope, kind);
+    `);
 
+    if (!this.ftsEnabled) {
+      // Drop any FTS5 artifacts left by a previous run on an FTS-enabled Node,
+      // otherwise their triggers would fail inserts with "no such module: fts5".
+      for (const statement of [
+        "DROP TRIGGER IF EXISTS retrieval_documents_ai",
+        "DROP TRIGGER IF EXISTS retrieval_documents_ad",
+        "DROP TRIGGER IF EXISTS retrieval_documents_au",
+        "DROP TABLE IF EXISTS retrieval_documents_fts",
+      ]) {
+        try { this.db.exec(statement); } catch { /* missing module; ignore */ }
+      }
+      return;
+    }
+
+    this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS retrieval_documents_fts USING fts5(
         title_tokens,
         body_tokens,
@@ -196,6 +298,20 @@ export class LocalSearchIndex {
       END;
     `);
   }
+}
+
+function probeFts5(db: DatabaseSync): boolean {
+  try {
+    db.exec("CREATE VIRTUAL TABLE __inkos_fts_probe USING fts5(probe_column)");
+    db.exec("DROP TABLE __inkos_fts_probe");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
 export function splitMarkdownForSearch(markdown: string): MarkdownSearchSegment[] {
