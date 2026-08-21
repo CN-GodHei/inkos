@@ -46,6 +46,10 @@ const strings = {
   "book.approve": { zh: "通过", en: "Approve" },
   "book.reject": { zh: "驳回", en: "Reject" },
   "book.words": { zh: "字", en: "words" },
+  "book.newestFirst": { zh: "最新在前", en: "Newest first" },
+  "book.oldestFirst": { zh: "最早在前", en: "Oldest first" },
+  "book.toggleChapterOrder": { zh: "切换章节排序", en: "Toggle chapter order" },
+  "book.exportFailed": { zh: "导出失败", en: "Export failed" },
 
   // Chapter Reader
   "reader.backToList": { zh: "返回列表", en: "Back to List" },

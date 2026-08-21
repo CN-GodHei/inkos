@@ -42,7 +42,9 @@ export function ChaptersSection({ bookId, isZh }: ChaptersSectionProps) {
         </p>
       ) : (
         <ul className="space-y-1 max-h-52 overflow-y-auto overflow-x-hidden">
-          {chapters.map((ch) => {
+          {[...chapters]
+            .sort((a, b) => b.number - a.number)
+            .map((ch) => {
             const ind = STATUS_INDICATOR[ch.status] ?? { symbol: "○", color: "text-muted-foreground" };
             return (
               <li

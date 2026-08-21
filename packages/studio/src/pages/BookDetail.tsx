@@ -26,7 +26,8 @@ import {
   Trash2,
   Save,
   Hand,
-  Settings2
+  Settings2,
+  ArrowUpDown
 } from "lucide-react";
 
 interface ChapterMeta {
@@ -115,6 +116,7 @@ export function BookDetail({
   // run audit / revise / approve as checkpoint actions). This is scoped to
   // the current book, with project-level mode as the inherited default.
   const [reviewMode, setReviewMode] = useState<"auto" | "manual">("auto");
+  const [chapterOrder, setChapterOrder] = useState<"asc" | "desc">("desc");
   useEffect(() => {
     void fetchJson<{ mode?: string }>(`/books/${encodeURIComponent(bookId)}/chapter-review-mode`)
       .then((r) => setReviewMode(r.mode === "manual" ? "manual" : "auto"))
@@ -430,6 +432,10 @@ export function BookDetail({
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
   const reviewCount = chapters.filter((ch) => ch.status === "ready-for-review").length;
 
+  const orderedChapters = chapterOrder === "desc"
+    ? [...chapters].sort((a, b) => b.number - a.number)
+    : [...chapters].sort((a, b) => a.number - b.number);
+
   const currentWordCount = settingsWordCount ?? book.chapterWordCount;
   const currentTargetChapters = settingsTargetChapters ?? book.targetChapters ?? 0;
   const currentStatus = settingsStatus ?? (book.status as BookStatus);
@@ -691,6 +697,17 @@ export function BookDetail({
 
       {/* Chapters Table */}
       <div className="paper-sheet rounded-2xl overflow-hidden border border-border/40 shadow-xl shadow-primary/5">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border/40">
+          <span className="font-bold text-[11px] uppercase tracking-widest text-muted-foreground">{t("dash.chapters")}</span>
+          <button
+            onClick={() => setChapterOrder((prev) => (prev === "desc" ? "asc" : "desc"))}
+            className="flex items-center gap-1.5 text-xs font-bold text-muted-foreground hover:text-primary transition-colors"
+            title={t("book.toggleChapterOrder")}
+          >
+            <ArrowUpDown size={13} />
+            {chapterOrder === "desc" ? t("book.newestFirst") : t("book.oldestFirst")}
+          </button>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm border-collapse">
             <thead>
@@ -703,7 +720,7 @@ export function BookDetail({
               </tr>
             </thead>
             <tbody className="divide-y divide-border/30">
-              {chapters.map((ch, index) => {
+              {orderedChapters.map((ch, index) => {
                 const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
                 return (
                 <tr key={ch.number} className={`group hover:bg-primary/[0.02] transition-colors fade-in ${staggerClass}`}>
