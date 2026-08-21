@@ -2668,7 +2668,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     if (message.includes("LLM API key not set") || message.includes("INKOS_LLM_API_KEY not set")) {
       return c.json({ error: { code: "LLM_CONFIG_ERROR", message } }, 400);
     }
-    console.error("[studio] Unexpected server error", error);
+    // Log only the message, never the full error object: PartialResponseError
+    // carries partialContent (raw LLM output mid-stream), which would flood the
+    // terminal with the interrupted generation dump.
+    console.error("[studio] Unexpected server error:", message);
     return c.json(
       { error: { code: "INTERNAL_ERROR", message: "Unexpected server error." } },
       500,
@@ -2701,6 +2704,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   // Logger sink that prints to server terminal
   const consoleSink: LogSink = {
     write(entry: LogEntry): void {
+      // Debug-level pipeline detail (per-step phases like 2a/2b) stays off the
+      // terminal; it is still broadcast to the Studio UI through the SSE sink.
+      if (entry.level === "debug") return;
       const prefix = `[${entry.tag}]`;
       if (entry.level === "warn") console.warn(prefix, entry.message);
       else if (entry.level === "error") console.error(prefix, entry.message);

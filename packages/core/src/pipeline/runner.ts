@@ -434,6 +434,8 @@ export class PipelineRunner {
     readonly signal?: AbortSignal;
     readonly activatedSkills?: ReadonlyArray<ActivatedSkillGuidance>;
   }>();
+  private lastStageAt = 0;
+  private lastStageName = "";
 
   constructor(config: PipelineConfig) {
     this.config = config;
@@ -511,9 +513,19 @@ export class PipelineRunner {
   }
 
   private logStage(language: LengthLanguage, message: { zh: string; en: string }): void {
-    this.config.logger?.info(
-      `${this.localize(language, { zh: "阶段：", en: "Stage: " })}${this.localize(language, message)}`,
-    );
+    const label = `${this.localize(language, { zh: "阶段：", en: "Stage: " })}${this.localize(language, message)}`;
+    const now = Date.now();
+    const elapsedMs = this.lastStageAt > 0 ? now - this.lastStageAt : 0;
+    // Only surface the timing when the previous stage actually took a
+    // meaningful amount of time (>= 100ms), so book-setup and index/snapshot
+    // micro-steps do not spam "0.0s" after every line.
+    if (elapsedMs >= 100 && this.lastStageName) {
+      this.config.logger?.info(`${label}（上阶段"${this.lastStageName}"耗时 ${(elapsedMs / 1000).toFixed(1)}s）`);
+    } else {
+      this.config.logger?.info(label);
+    }
+    this.lastStageAt = now;
+    this.lastStageName = this.localize(language, message);
   }
 
   private logInfo(language: LengthLanguage, message: { zh: string; en: string }): void {

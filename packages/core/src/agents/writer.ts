@@ -128,12 +128,26 @@ export class WriterAgent extends BaseAgent {
     return "writer";
   }
 
+  private lastInfoAt = 0;
+
   private localize(language: "zh" | "en", messages: { zh: string; en: string }): string {
     return language === "en" ? messages.en : messages.zh;
   }
 
   private logInfo(language: "zh" | "en", messages: { zh: string; en: string }): void {
-    this.ctx.logger?.info(this.localize(language, messages));
+    const label = this.localize(language, messages);
+    const now = Date.now();
+    const elapsedMs = this.lastInfoAt > 0 ? now - this.lastInfoAt : 0;
+    if (elapsedMs >= 100) {
+      this.ctx.logger?.info(`${label}（上阶段耗时 ${(elapsedMs / 1000).toFixed(1)}s）`);
+    } else {
+      this.ctx.logger?.info(label);
+    }
+    this.lastInfoAt = now;
+  }
+
+  private logDebug(language: "zh" | "en", messages: { zh: string; en: string }): void {
+    this.ctx.logger?.debug(this.localize(language, messages));
   }
 
   private logWarn(language: "zh" | "en", messages: { zh: string; en: string }): void {
@@ -527,7 +541,7 @@ export class WriterAgent extends BaseAgent {
     const observerSystem = buildObserverSystemPrompt(params.book, params.genreProfile, resolvedLang);
     const observerUser = buildObserverUserPrompt(params.chapterNumber, params.title, params.content, resolvedLang);
 
-    this.logInfo(resolvedLang, {
+    this.logDebug(resolvedLang, {
       zh: `阶段 2a：提取第${params.chapterNumber}章事实`,
       en: `Phase 2a: observing facts for chapter ${params.chapterNumber}`,
     });
@@ -541,7 +555,7 @@ export class WriterAgent extends BaseAgent {
     const observations = observerResponse.content;
 
     // Phase 2b: Reflector — merge observations into truth files
-    this.logInfo(resolvedLang, {
+    this.logDebug(resolvedLang, {
       zh: "阶段 2b：把观察结果回写到真相文件",
       en: "Phase 2b: reflecting observations into truth files",
     });

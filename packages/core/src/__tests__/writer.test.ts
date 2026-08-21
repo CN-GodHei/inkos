@@ -36,10 +36,13 @@ function createGovernedWriterInput(chapter: number) {
 
 function createCaptureLogger() {
   const infos: string[] = [];
+  const debugs: string[] = [];
   const warnings: string[] = [];
 
   const logger = {
-    debug() {},
+    debug(message: string) {
+      debugs.push(message);
+    },
     info(message: string) {
       infos.push(message);
     },
@@ -52,7 +55,7 @@ function createCaptureLogger() {
     },
   };
 
-  return { logger, infos, warnings };
+  return { logger, infos, debugs, warnings };
 }
 
 describe("WriterAgent", () => {
@@ -927,7 +930,7 @@ describe("WriterAgent", () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-test-"));
     const bookDir = join(root, "book");
     const storyDir = join(bookDir, "story");
-    const { logger, infos } = createCaptureLogger();
+    const { logger, infos, debugs } = createCaptureLogger();
     await mkdir(storyDir, { recursive: true });
     await mkdir(join(root, "prompt", "longform"), { recursive: true });
 
@@ -1028,6 +1031,8 @@ describe("WriterAgent", () => {
       expect(infos).toEqual(expect.arrayContaining([
         "阶段 1：创作正文（第1章）",
         "阶段 2：状态结算（第1章，18字）",
+      ]));
+      expect(debugs).toEqual(expect.arrayContaining([
         "阶段 2a：提取第1章事实",
         "阶段 2b：把观察结果回写到真相文件",
       ]));
