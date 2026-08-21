@@ -3,6 +3,7 @@ import type { AuditIssue, AuditResult } from "../agents/continuity.js";
 import type { ValidationResult } from "../agents/state-validator.js";
 import type { WriteChapterOutput } from "../agents/writer.js";
 import type { BookConfig } from "../models/book.js";
+import type { Logger } from "../utils/logger.js";
 import { validateChapterTruthPersistence } from "../pipeline/chapter-truth-validation.js";
 
 const ZERO_USAGE = {
@@ -10,6 +11,17 @@ const ZERO_USAGE = {
   completionTokens: 0,
   totalTokens: 0,
 } as const;
+
+function createLoggerMock(): Logger {
+  const logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: () => logger,
+  };
+  return logger;
+}
 
 function createAuditResult(overrides?: Partial<AuditResult>): AuditResult {
   return {
@@ -64,15 +76,14 @@ const BOOK: BookConfig = {
 };
 
 describe("validateChapterTruthPersistence", () => {
-  it("retries settlement when the validator requests repair without a hard contradiction", async () => {
+  it("accepts REPAIR without retry or degradation when the validator requests repair without a hard contradiction", async () => {
     const validator = {
       validate: vi.fn()
         .mockResolvedValueOnce(createValidationResult({
           passed: false,
           repairRequired: true,
           warnings: [{ category: "missing_state_update", description: "位置尚未更新。" }],
-        }))
-        .mockResolvedValueOnce(createValidationResult()),
+        })),
     };
     const writer = {
       settleChapterState: vi.fn().mockResolvedValue(createWriterOutput({ updatedState: "码头" })),
@@ -93,9 +104,17 @@ describe("validateChapterTruthPersistence", () => {
       logWarn: vi.fn(),
     });
 
-    expect(writer.settleChapterState).toHaveBeenCalledTimes(1);
+    // REPAIR is not a hard contradiction: no settlement retry, no degradation.
+    expect(writer.settleChapterState).not.toHaveBeenCalled();
     expect(result.chapterStatus).toBeNull();
-    expect(result.persistenceOutput.updatedState).toBe("码头");
+    expect(result.degradedIssues).toEqual([]);
+    expect(result.persistenceOutput.updatedState).toBe("车站");
+    expect(result.auditResult.issues).toEqual([
+      expect.objectContaining({
+        category: "state-validation",
+        description: "位置尚未更新。",
+      }),
+    ]);
   });
 
   it("uses recovered settlement output when retry succeeds", async () => {
@@ -120,7 +139,7 @@ describe("validateChapterTruthPersistence", () => {
       ),
     };
     const logWarn = vi.fn();
-    const logger = { warn: vi.fn() };
+    const logger = createLoggerMock();
 
     const result = await validateChapterTruthPersistence({
       writer,
@@ -156,7 +175,7 @@ describe("validateChapterTruthPersistence", () => {
     expect(result.persistenceOutput.updatedState).toBe("fixed state");
     expect(result.persistenceOutput.updatedHooks).toBe("fixed hooks");
     expect(result.auditResult.issues).toEqual([]);
-    expect(logger.warn).toHaveBeenCalledWith("  [unsupported_change] 正文写铜牌在怀里，但 state 说未携带。");
+    expect(logger.debug).toHaveBeenCalledWith("  [unsupported_change] 正文写铜牌在怀里，但 state 说未携带。");
   });
 
   it("degrades gracefully when validator throws (e.g. LLM returned empty response)", async () => {
@@ -167,7 +186,7 @@ describe("validateChapterTruthPersistence", () => {
       settleChapterState: vi.fn(),
     };
     const logWarn = vi.fn();
-    const logger = { warn: vi.fn() };
+    const logger = createLoggerMock();
 
     const result = await validateChapterTruthPersistence({
       writer,
@@ -262,7 +281,7 @@ describe("validateChapterTruthPersistence", () => {
       },
       language: "zh",
       logWarn: vi.fn(),
-      logger: { warn: vi.fn() },
+      logger: createLoggerMock(),
     });
 
     expect(result.chapterStatus).toBe("state-degraded");
@@ -283,5 +302,54 @@ describe("validateChapterTruthPersistence", () => {
         description: "重试后仍然失败。",
       }),
     ]);
+  });
+
+  it("does not degrade when the validator returns REPAIR — the chapter is valid, only state is imperfect", async () => {
+    const repairWarning = {
+      category: "missing_state_update",
+      description: "状态卡未记录城门盘查细节。",
+    };
+    const validator = {
+      validate: vi.fn().mockResolvedValue(createValidationResult({
+        passed: false,
+        repairRequired: true,
+        warnings: [repairWarning],
+      })),
+    };
+    const writer = {
+      settleChapterState: vi.fn(),
+    };
+
+    const result = await validateChapterTruthPersistence({
+      writer,
+      validator,
+      book: BOOK,
+      bookDir: "/tmp/book",
+      chapterNumber: 5,
+      title: "Test Chapter",
+      content: "Healthy chapter body.",
+      persistenceOutput: createWriterOutput({ updatedState: "初始状态" }),
+      auditResult: createAuditResult(),
+      previousTruth: {
+        oldState: "old state",
+        oldHooks: "old hooks",
+        oldLedger: "old ledger",
+      },
+      language: "zh",
+      logWarn: vi.fn(),
+      logger: createLoggerMock(),
+    });
+
+    expect(writer.settleChapterState).not.toHaveBeenCalled();
+    expect(result.chapterStatus).toBeNull();
+    expect(result.degradedIssues).toEqual([]);
+    // REPAIR keeps the settlement output instead of freezing to old truth.
+    expect(result.persistenceOutput.updatedState).toBe("初始状态");
+    expect(result.auditResult.issues).toContainEqual(
+      expect.objectContaining({
+        category: "state-validation",
+        description: repairWarning.description,
+      }),
+    );
   });
 });

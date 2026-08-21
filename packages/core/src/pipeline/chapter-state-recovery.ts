@@ -32,7 +32,7 @@ export interface SettlementRetryParams {
   readonly originalValidation: ValidationResult;
   readonly language: LengthLanguage;
   readonly logWarn?: (message: { zh: string; en: string }) => void;
-  readonly logger?: Pick<Logger, "warn">;
+  readonly logger?: Logger;
 }
 
 export type SettlementRetryResult =
@@ -93,7 +93,7 @@ export async function retrySettlementAfterValidationFailure(
       en: `State validation retry still reports ${retryValidation.warnings.length} warning(s) for chapter ${params.chapterNumber}`,
     });
     for (const warning of retryValidation.warnings) {
-      params.logger?.warn(`  [${warning.category}] ${warning.description}`);
+      params.logger?.debug(`  [${warning.category}] ${warning.description}`);
     }
   }
 

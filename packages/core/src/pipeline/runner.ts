@@ -2405,7 +2405,7 @@ export class PipelineRunner {
       ];
       if (paragraphIssues.length > 0) {
         for (const issue of paragraphIssues) {
-          this.config.logger?.warn(`[paragraph] ${issue.description}`);
+          this.config.logger?.debug(`[paragraph] ${issue.description}`);
         }
         auditResult = {
           ...auditResult,

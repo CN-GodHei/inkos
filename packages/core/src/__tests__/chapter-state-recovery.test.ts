@@ -43,6 +43,9 @@ function createValidationResult(
 ): ValidationResult {
   return {
     passed: overrides.passed ?? false,
+    ...(overrides.repairRequired !== undefined
+      ? { repairRequired: overrides.repairRequired }
+      : {}),
     warnings: overrides.warnings ?? [createValidationWarning()],
   };
 }
@@ -120,7 +123,7 @@ describe("chapter-state-recovery", () => {
       originalValidation: createValidationResult(),
       language: "zh",
       logWarn,
-      logger: { warn } as never,
+      logger: { warn, debug: vi.fn() } as never,
     });
 
     expect(result.kind).toBe("recovered");
@@ -135,7 +138,7 @@ describe("chapter-state-recovery", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it("returns localized degraded issues when settlement retry still fails", async () => {
+  it("returns localized degraded issues when a hard contradiction (FAIL) persists after retry", async () => {
     const validatorWarning = createValidationWarning({
       description: "挂坠状态仍与正文冲突",
     });
@@ -146,6 +149,7 @@ describe("chapter-state-recovery", () => {
       validator: {
         validate: vi.fn(async () => createValidationResult({
           passed: false,
+          repairRequired: false,
           warnings: [validatorWarning],
         })),
       } as never,
@@ -161,7 +165,7 @@ describe("chapter-state-recovery", () => {
       }),
       language: "zh",
       logWarn: vi.fn(),
-      logger: { warn: vi.fn() } as never,
+      logger: { warn: vi.fn(), debug: vi.fn() } as never,
     });
 
     expect(result.kind).toBe("degraded");

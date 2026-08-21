@@ -1306,13 +1306,16 @@ describe("PipelineRunner", () => {
     try {
       await runner.initBook(book);
 
-      expect(infos).toEqual(expect.arrayContaining([
+      const initStageMessages = [
         "阶段：保存书籍配置",
         "阶段：生成基础设定",
         "阶段：写入基础设定文件",
         "阶段：初始化控制文档",
         "阶段：创建初始快照",
-      ]));
+      ];
+      for (const expected of initStageMessages) {
+        expect(infos.some((message) => message.startsWith(expected))).toBe(true);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1633,7 +1636,7 @@ describe("PipelineRunner", () => {
     try {
       await runner.writeNextChapter(bookId, 220);
 
-      expect(infos).toEqual(expect.arrayContaining([
+      const stageMessages = [
         "阶段：准备章节输入",
         "阶段：撰写章节草稿",
         "阶段：审计草稿",
@@ -1642,7 +1645,10 @@ describe("PipelineRunner", () => {
         "阶段：校验真相文件变更",
         "阶段：同步记忆索引",
         "阶段：更新章节索引与快照",
-      ]));
+      ];
+      for (const expected of stageMessages) {
+        expect(infos.some((message) => message.startsWith(expected))).toBe(true);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1687,7 +1693,7 @@ describe("PipelineRunner", () => {
     try {
       await runner.writeNextChapter(bookId, 220);
 
-      expect(infos).toEqual(expect.arrayContaining([
+      const stageMessages = [
         "Stage: preparing chapter inputs",
         "Stage: writing chapter draft",
         "Stage: auditing draft",
@@ -1696,7 +1702,10 @@ describe("PipelineRunner", () => {
         "Stage: validating truth file updates",
         "Stage: syncing memory indexes",
         "Stage: updating chapter index and snapshots",
-      ]));
+      ];
+      for (const expected of stageMessages) {
+        expect(infos.some((message) => message.startsWith(expected))).toBe(true);
+      }
       expect(infos.join("\n")).not.toContain("阶段：");
     } finally {
       await rm(root, { recursive: true, force: true });

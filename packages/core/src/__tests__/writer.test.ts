@@ -1028,14 +1028,10 @@ describe("WriterAgent", () => {
         lengthSpec: buildLengthSpec(220, "zh"),
       });
 
-      expect(infos).toEqual(expect.arrayContaining([
-        "阶段 1：创作正文（第1章）",
-        "阶段 2：状态结算（第1章，18字）",
-      ]));
-      expect(debugs).toEqual(expect.arrayContaining([
-        "阶段 2a：提取第1章事实",
-        "阶段 2b：把观察结果回写到真相文件",
-      ]));
+      expect(infos.some((message) => message.startsWith("阶段 1：创作正文（第1章）"))).toBe(true);
+      expect(infos.some((message) => message.startsWith("阶段 2：状态结算（第1章，18字）"))).toBe(true);
+      expect(debugs.some((message) => message.startsWith("阶段 2a：提取第1章事实"))).toBe(true);
+      expect(debugs.some((message) => message.startsWith("阶段 2b：把观察结果回写到真相文件"))).toBe(true);
       const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
       expect(messages?.[0]?.content ?? "").toContain("PROJECT WRITER OVERRIDE");
     } finally {

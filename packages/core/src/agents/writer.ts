@@ -348,7 +348,7 @@ export class WriterAgent extends BaseAgent {
         en: `Post-write: ${postWriteErrors.length} errors, ${postWriteWarnings.length} warnings in chapter ${chapterNumber}`,
       });
       for (const v of ruleViolations) {
-        this.ctx.logger?.warn(`[${v.severity}] ${v.rule}: ${v.description}`);
+        this.ctx.logger?.debug(`[${v.severity}] ${v.rule}: ${v.description}`);
       }
     }
     if (aiTellIssues.length > 0) {
@@ -357,7 +357,7 @@ export class WriterAgent extends BaseAgent {
         en: `AI-tell check: ${aiTellIssues.length} issues in chapter ${chapterNumber}`,
       });
       for (const issue of aiTellIssues) {
-        this.ctx.logger?.warn(`[${issue.severity}] ${issue.category}: ${issue.description}`);
+        this.ctx.logger?.debug(`[${issue.severity}] ${issue.category}: ${issue.description}`);
       }
     }
     if (hookHealthIssues.length > 0) {
@@ -366,7 +366,7 @@ export class WriterAgent extends BaseAgent {
         en: `Hook health: ${hookHealthIssues.length} warning(s) in chapter ${chapterNumber}`,
       });
       for (const issue of hookHealthIssues) {
-        this.ctx.logger?.warn(`[${issue.severity}] ${issue.category}: ${issue.description}`);
+        this.ctx.logger?.debug(`[${issue.severity}] ${issue.category}: ${issue.description}`);
       }
     }
 

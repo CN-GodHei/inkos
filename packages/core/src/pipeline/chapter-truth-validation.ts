@@ -33,7 +33,7 @@ export async function validateChapterTruthPersistence(params: {
   };
   readonly language: LengthLanguage;
   readonly logWarn: (message: { zh: string; en: string }) => void;
-  readonly logger?: Pick<Logger, "warn">;
+  readonly logger?: Logger;
 }): Promise<{
   readonly validation: ValidationResult;
   readonly chapterStatus: "state-degraded" | null;
@@ -94,11 +94,13 @@ export async function validateChapterTruthPersistence(params: {
       en: `State validation: ${validation.warnings.length} warning(s) for chapter ${params.chapterNumber}`,
     });
     for (const warning of validation.warnings) {
-      params.logger?.warn(`  [${warning.category}] ${warning.description}`);
+      params.logger?.debug(`  [${warning.category}] ${warning.description}`);
     }
   }
 
-  if (!validation.passed || validation.repairRequired) {
+  if (!validation.passed && !validation.repairRequired) {
+    // Hard FAIL: the proposed truth-file changes contradict the chapter or
+    // authority context. Retry once; if it still fails, degrade the chapter.
     const recovery = await retrySettlementAfterValidationFailure({
       writer: params.writer,
       validator: params.validator,
@@ -133,6 +135,28 @@ export async function validateChapterTruthPersistence(params: {
         issues: [...auditResult.issues, ...recovery.issues],
       };
     }
+  } else if (!validation.passed && validation.repairRequired) {
+    // REPAIR: the chapter itself is valid but the truth-file settlement is
+    // missing/stale/incomplete. Blocking the whole chapter on that is too
+    // strict — it frequently locked chapters into state-degraded for minor
+    // state-card omissions, and the degraded chapter then skipped the
+    // truth-file write, so the next chapter re-derived stale state and
+    // re-triggered the loop. Accept the settlement output and surface the
+    // warnings as audit issues; only a hard FAIL degrades.
+    auditResult = {
+      ...auditResult,
+      issues: [
+        ...auditResult.issues,
+        ...validation.warnings.map((warning) => ({
+          severity: "warning" as const,
+          category: "state-validation",
+          description: warning.description,
+          suggestion: params.language === "en"
+            ? "The state card may lag the chapter; reconcile when convenient."
+            : "状态卡可能滞后于正文，方便时可顺手补充。",
+        })),
+      ],
+    };
   }
 
   return {
