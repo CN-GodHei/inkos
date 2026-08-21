@@ -235,6 +235,12 @@ export {
 } from "./utils/proxy-fetch.js";
 export { assertSafeBookId, deriveBookIdFromTitle, isSafeBookId } from "./utils/book-id.js";
 export { safeChildPath } from "./utils/path-safety.js";
+export {
+  buildProjectArchive,
+  extractProjectArchive,
+  PROJECT_ARCHIVE_INCLUDE_DIRS,
+  PROJECT_ARCHIVE_ROOT_FILES,
+} from "./utils/project-archive.js";
 export { toPosixPath } from "./utils/posix-path.js";
 export {
   AutomationModeSchema,

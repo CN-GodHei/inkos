@@ -327,6 +327,8 @@ vi.mock("@actalk/inkos-core", async (importOriginal) => {
     defaultChapterLength: actual.defaultChapterLength,
     inferLanguage: actual.inferLanguage,
     ingestMaterial: actual.ingestMaterial,
+    buildProjectArchive: actual.buildProjectArchive,
+    extractProjectArchive: actual.extractProjectArchive,
     chatCompletion: chatCompletionMock,
     runWorkerAgent: runWorkerAgentMock,
     loadProjectConfig: loadProjectConfigMock,
@@ -6704,6 +6706,56 @@ describe("createStudioServer daemon lifecycle", () => {
     await sseReader.cancel();
     await ssePump;
   }, 60_000);
+
+  it("exports the whole project as a zip and restores it on import", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    await writeCompleteBookFixture(root, "migrate-book");
+    await mkdir(join(root, "books", "migrate-book", "chapters"), { recursive: true });
+    await writeFile(join(root, "books", "migrate-book", "chapters", "0001_Start.md"), "# Start\n", "utf-8");
+
+    const exported = await app.request("http://localhost/api/v1/project/export");
+    expect(exported.status).toBe(200);
+    expect(exported.headers.get("content-type")).toContain("application/zip");
+    const zipBuffer = Buffer.from(await exported.arrayBuffer());
+
+    // Import into a fresh root and verify the book + config came back.
+    const target = await mkdtemp(join(tmpdir(), "inkos-project-import-"));
+    try {
+      const { extractProjectArchive } = await import("@actalk/inkos-core");
+      await extractProjectArchive(target, zipBuffer);
+      await expect(readFile(join(target, "inkos.json"), "utf-8")).resolves.toContain("provider");
+      await expect(readFile(join(target, "books", "migrate-book", "chapters", "0001_Start.md"), "utf-8")).resolves.toBe("# Start\n");
+    } finally {
+      await rm(target, { recursive: true, force: true });
+    }
+  });
+
+  it("project/import extracts an uploaded archive into the project root", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const { buildProjectArchive } = await import("@actalk/inkos-core");
+    const source = await mkdtemp(join(tmpdir(), "inkos-project-upload-src-"));
+    try {
+      await mkdir(join(source, "books", "arrived"), { recursive: true });
+      await writeFile(join(source, "inkos.json"), JSON.stringify({ name: "migrated", language: "zh" }));
+      await writeFile(join(source, "books", "arrived", "book.json"), JSON.stringify({ id: "arrived" }));
+      const archive = Buffer.from(await buildProjectArchive(source));
+
+      const imported = await app.request("http://localhost/api/v1/project/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "backup.zip", dataUrl: `data:application/zip;base64,${archive.toString("base64")}` }),
+      });
+      expect(imported.status).toBe(200);
+      const body = await imported.json() as { ok: boolean; filesWritten: number };
+      expect(body.ok).toBe(true);
+      expect(body.filesWritten).toBe(2);
+      await expect(readFile(join(root, "books", "arrived", "book.json"), "utf-8")).resolves.toContain("arrived");
+    } finally {
+      await rm(source, { recursive: true, force: true });
+    }
+  });
 
   it("spinoff/init validates input, 404s a missing parent, and otherwise runs initSpinoffBook", async () => {
     const { createStudioServer } = await import("./server.js");

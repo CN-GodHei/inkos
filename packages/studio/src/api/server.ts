@@ -40,6 +40,8 @@ import {
   chatCompletion,
   runWorkerAgent,
   buildExportArtifact,
+  buildProjectArchive,
+  extractProjectArchive,
   evaluateBookQuality,
   ConsolidatorAgent,
   DetectionConfigSchema,
@@ -610,6 +612,7 @@ const MAX_AGENT_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 const MAX_AGENT_ATTACHMENT_TEXT_CHARS = 120_000;
 const MAX_TRANSLATION_UPLOAD_BYTES = 80 * 1024 * 1024;
 const MAX_CANON_UPLOAD_BYTES = 18 * 1024 * 1024;
+const MAX_PROJECT_UPLOAD_BYTES = 512 * 1024 * 1024;
 const MAX_SKILL_IMPORT_FILES = 128;
 const MAX_SKILL_IMPORT_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_SKILL_IMPORT_TOTAL_BYTES = 8 * 1024 * 1024;
@@ -4006,6 +4009,49 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       stream: currentConfig.llm.stream,
       temperature: currentConfig.llm.temperature,
     });
+  });
+
+  // --- Project migration: full workspace export / import ---
+
+  app.get("/api/v1/project/export", async (c) => {
+    try {
+      const archive = await buildProjectArchive(root);
+      return new Response(new Uint8Array(archive), {
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="inkos-project.zip"`,
+        },
+      });
+    } catch (error) {
+      return c.json({
+        error: error instanceof Error ? error.message : "Project export failed",
+      }, 500);
+    }
+  });
+
+  app.post("/api/v1/project/import", async (c) => {
+    const body: { readonly filename?: string; readonly dataUrl?: string } = await c.req
+      .json<{ readonly filename?: string; readonly dataUrl?: string }>()
+      .catch(() => ({}));
+    if (!body.dataUrl) {
+      return c.json({ error: "Import archive is missing dataUrl" }, 400);
+    }
+    let parsed;
+    try {
+      parsed = parseDataUrl(body.dataUrl);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Invalid archive" }, 400);
+    }
+    if (parsed.buffer.byteLength > MAX_PROJECT_UPLOAD_BYTES) {
+      return c.json({ error: `Archive exceeds ${MAX_PROJECT_UPLOAD_BYTES} bytes` }, 413);
+    }
+    try {
+      const result = await extractProjectArchive(root, parsed.buffer);
+      cachedConfig = await loadProjectConfig(root, { consumer: "studio" }).catch(() => cachedConfig);
+      return c.json({ ok: true, filesWritten: result.filesWritten });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Project import failed" }, 500);
+    }
   });
 
   app.get("/api/v1/skills", async (c) => {

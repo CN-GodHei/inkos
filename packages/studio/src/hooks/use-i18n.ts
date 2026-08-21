@@ -50,6 +50,11 @@ const strings = {
   "book.oldestFirst": { zh: "最早在前", en: "Oldest first" },
   "book.toggleChapterOrder": { zh: "切换章节排序", en: "Toggle chapter order" },
   "book.exportFailed": { zh: "导出失败", en: "Export failed" },
+  "project.export": { zh: "导出项目", en: "Export Project" },
+  "project.import": { zh: "导入项目", en: "Import Project" },
+  "project.exportFailed": { zh: "导出项目失败", en: "Project export failed" },
+  "project.importFailed": { zh: "导入项目失败", en: "Project import failed" },
+  "project.importSuccess": { zh: "项目导入成功", en: "Project imported" },
 
   // Chapter Reader
   "reader.backToList": { zh: "返回列表", en: "Back to List" },

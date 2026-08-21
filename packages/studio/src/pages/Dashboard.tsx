@@ -22,6 +22,8 @@ import {
   Settings,
   Download,
   FileInput,
+  Package,
+  Upload,
 } from "lucide-react";
 
 interface BookSummary {
@@ -149,6 +151,8 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
 export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: ReadonlyArray<SSEMessage> }; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
   const [menuOpenBookId, setMenuOpenBookId] = useState<string | null>(null);
+  const [importingProject, setImportingProject] = useState(false);
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
   const { data, loading, error, refetch } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const writingBooks = useMemo(() => deriveActiveBookIds(sse.messages), [sse.messages]);
   const serviceStoreServices = useServiceStore((s) => s.services);
@@ -166,6 +170,53 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
       refetch();
     }
   }, [refetch, sse.messages]);
+
+  const handleExportProject = async () => {
+    try {
+      const res = await fetch("/api/v1/project/export", { method: "GET" });
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error ?? t("project.exportFailed"));
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const fileName = /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? "inkos-project.zip";
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : t("project.exportFailed"));
+    }
+  };
+
+  const handleImportProject = async (file: File) => {
+    if (!file) return;
+    setImportingProject(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ""));
+        reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+        reader.readAsDataURL(file);
+      });
+      const data = await fetchJson<{ filesWritten?: number }>("/project/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, dataUrl }),
+      });
+      alert(`${t("project.importSuccess")}（${data.filesWritten ?? 0} ${t("dash.chapters")}）`);
+      refetch();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : t("project.importFailed"));
+    } finally {
+      setImportingProject(false);
+    }
+  };
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center py-32 space-y-4">
@@ -192,13 +243,34 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
         <p className="text-sm text-muted-foreground max-w-xs leading-relaxed mb-10">
           {t("dash.createFirst")}
         </p>
-        <button
-          onClick={nav.toBookCreate}
-          className="group flex items-center gap-2 px-8 py-3.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
-        >
-          <Plus size={18} />
-          {t("nav.newBook")}
-        </button>
+        <div className="flex flex-col items-center gap-3">
+          <button
+            onClick={nav.toBookCreate}
+            className="group flex items-center gap-2 px-8 py-3.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
+          >
+            <Plus size={18} />
+            {t("nav.newBook")}
+          </button>
+          <button
+            onClick={() => projectFileInputRef.current?.click()}
+            disabled={importingProject}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-secondary/60 text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            {importingProject ? <div className="w-4 h-4 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" /> : <Upload size={15} />}
+            {importingProject ? t("common.loading") : `${t("project.import")} (.zip)`}
+          </button>
+          <input
+            ref={projectFileInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleImportProject(file);
+              e.target.value = "";
+            }}
+          />
+        </div>
       </div>
     );
   }
@@ -224,13 +296,41 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           <h1 className="font-serif text-4xl mb-2">{t("dash.title")}</h1>
           <p className="text-sm text-muted-foreground">{t("dash.subtitle")}</p>
         </div>
-        <button
-          onClick={nav.toBookCreate}
-          className="group flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
-        >
-          <Plus size={16} />
-          {t("nav.newBook")}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={handleExportProject}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold bg-secondary/60 text-foreground hover:bg-secondary transition-all border border-border/50"
+          >
+            <Package size={15} />
+            {t("project.export")}
+          </button>
+          <button
+            onClick={() => projectFileInputRef.current?.click()}
+            disabled={importingProject}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold bg-secondary/60 text-foreground hover:bg-secondary transition-all border border-border/50 disabled:opacity-50"
+          >
+            {importingProject ? <div className="w-4 h-4 border-2 border-muted-foreground/20 border-t-muted-foreground rounded-full animate-spin" /> : <Upload size={15} />}
+            {importingProject ? t("common.loading") : t("project.import")}
+          </button>
+          <input
+            ref={projectFileInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleImportProject(file);
+              e.target.value = "";
+            }}
+          />
+          <button
+            onClick={nav.toBookCreate}
+            className="group flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
+          >
+            <Plus size={16} />
+            {t("nav.newBook")}
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-6">
