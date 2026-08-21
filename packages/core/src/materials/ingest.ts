@@ -3,6 +3,7 @@ import { basename, extname, join, relative } from "node:path";
 import { extractText, getDocumentProxy } from "unpdf";
 import { safeChildPath } from "../utils/path-safety.js";
 import { toPosixPath } from "../utils/posix-path.js";
+import { decodeTextBuffer } from "../utils/text-encoding.js";
 
 export type MaterialPurpose = "reference" | "worldbuilding" | "script" | "storyboard" | "research" | "general";
 export type MaterialSourceKind = "url" | "file";
@@ -162,7 +163,7 @@ async function extractBufferMaterial(
       totalPages: extracted.totalPages,
     };
   }
-  const raw = buffer.toString("utf-8");
+  const raw = decodeTextBuffer(buffer);
   if (isHtml(meta.filename, mimeType)) {
     return {
       kind: "webpage",

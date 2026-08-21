@@ -1,6 +1,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { splitChapters, type SplitChapter } from "../utils/chapter-splitter.js";
+import { decodeTextBuffer } from "../utils/text-encoding.js";
 
 const CHAPTER_FILENAME_COLLATOR = new Intl.Collator("en", {
   numeric: true,
@@ -41,14 +42,14 @@ export async function loadChaptersFromPath(
 
     return Promise.all(
       textFiles.map(async (f) => {
-        const content = await readFile(join(sourcePath, f), "utf-8");
+        const content = decodeTextBuffer(await readFile(join(sourcePath, f)));
         const title = f.replace(/\.(md|txt)$/, "").replace(/^\d+[_\-\s]*/, "");
         return { title, content };
       }),
     );
   }
 
-  const text = await readFile(sourcePath, "utf-8");
+  const text = decodeTextBuffer(await readFile(sourcePath));
   const chapters = splitChapters(text, splitPattern);
 
   if (chapters.length === 0) {
