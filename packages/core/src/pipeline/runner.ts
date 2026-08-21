@@ -57,6 +57,12 @@ import {
 } from "./chapter-state-recovery.js";
 import { persistChapterArtifacts } from "./chapter-persistence.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
+import {
+  clearChapterResumeCheckpoint,
+  loadChapterResumeCheckpoint,
+  saveChapterResumeCheckpoint,
+  type ChapterResumeControlInput,
+} from "./chapter-resume.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir, savePersistedPlan } from "./persisted-governed-plan.js";
 import { selectBookReferenceContext } from "../references/reference-context.js";
@@ -2044,19 +2050,6 @@ export class PipelineRunner {
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
     const stageLanguage = await this.resolveBookLanguage(book);
     this.logStage(stageLanguage, { zh: "准备章节输入", en: "preparing chapter inputs" });
-    const writeInput = await this.prepareWriteInput(
-      book,
-      bookDir,
-      chapterNumber,
-      externalContext,
-    );
-    const reducedControlInput = {
-      chapterIntent: writeInput.chapterIntent,
-      chapterMemo: writeInput.chapterMemo,
-      chapterIntentData: writeInput.chapterIntentData,
-      contextPackage: writeInput.contextPackage,
-      ruleStack: writeInput.ruleStack,
-    };
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const lengthSpec = buildLengthSpec(
@@ -2071,23 +2064,93 @@ export class PipelineRunner {
     const { readBookRules } = await import("../agents/rules-reader.js");
     const parsedBookRules = (await readBookRules(bookDir))?.rules ?? null;
 
-    // 1. Write chapter
+    // Resume from a checkpoint left by an interrupted run: the prose + state
+    // settlement are already generated, so we skip the expensive write phase and
+    // restart from the audit → revise → persist stages.
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
-    this.logStage(stageLanguage, { zh: "撰写章节草稿", en: "writing chapter draft" });
-    const output = await writer.writeChapter({
-      book,
-      bookDir,
-      chapterNumber,
-      ...writeInput,
-      lengthSpec,
-      ...(wordCount ? { wordCountOverride: wordCount } : {}),
-      ...(temperatureOverride ? { temperatureOverride } : {}),
-    });
-    this.throwIfOperationAborted();
+    const checkpoint = await loadChapterResumeCheckpoint(bookDir, chapterNumber);
+    type PreparedWriteInput = Awaited<ReturnType<PipelineRunner["prepareWriteInput"]>>;
+    let writeInput: PreparedWriteInput;
+    let reducedControlInput: ChapterResumeControlInput;
+    let output: WriteChapterOutput;
+    let totalUsage: TokenUsageSummary;
+    if (checkpoint) {
+      this.logStage(stageLanguage, {
+        zh: `检测到第${chapterNumber}章未完成草稿，跳过正文写作直接续跑审计与落库`,
+        en: `found an incomplete draft for chapter ${chapterNumber}; skipping prose generation and resuming audit/persist`,
+      });
+      writeInput = {
+        externalContext: checkpoint.controlInput.externalContext,
+        chapterIntent: checkpoint.controlInput.chapterIntent,
+        chapterMemo: checkpoint.controlInput.chapterMemo ?? {
+          chapter: chapterNumber,
+          goal: "resumed",
+          isGoldenOpening: false,
+          body: "",
+          threadRefs: [],
+        },
+        chapterIntentData: checkpoint.controlInput.chapterIntentData,
+        contextPackage: checkpoint.controlInput.contextPackage,
+        ruleStack: checkpoint.controlInput.ruleStack,
+        ...(checkpoint.controlInput.contextTrace
+          ? { contextTrace: checkpoint.controlInput.contextTrace }
+          : {}),
+      };
+      reducedControlInput = {
+        chapterIntent: checkpoint.controlInput.chapterIntent,
+        chapterMemo: checkpoint.controlInput.chapterMemo,
+        chapterIntentData: checkpoint.controlInput.chapterIntentData,
+        contextPackage: checkpoint.controlInput.contextPackage,
+        ruleStack: checkpoint.controlInput.ruleStack,
+      };
+      output = checkpoint.output;
+      totalUsage = checkpoint.tokenUsage;
+    } else {
+      // 1. Write chapter
+      writeInput = await this.prepareWriteInput(
+        book,
+        bookDir,
+        chapterNumber,
+        externalContext,
+      );
+      reducedControlInput = {
+        chapterIntent: writeInput.chapterIntent,
+        chapterMemo: writeInput.chapterMemo,
+        chapterIntentData: writeInput.chapterIntentData,
+        contextPackage: writeInput.contextPackage,
+        ruleStack: writeInput.ruleStack,
+      };
+      this.logStage(stageLanguage, { zh: "撰写章节草稿", en: "writing chapter draft" });
+      output = await writer.writeChapter({
+        book,
+        bookDir,
+        chapterNumber,
+        ...writeInput,
+        lengthSpec,
+        ...(wordCount ? { wordCountOverride: wordCount } : {}),
+        ...(temperatureOverride ? { temperatureOverride } : {}),
+      });
+      this.throwIfOperationAborted();
+      totalUsage = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      // Persist the generated prose + state settlement as a resumable checkpoint
+      // so an interruption in the audit/revise/persist stages never loses the
+      // most expensive part of the pipeline.
+      await saveChapterResumeCheckpoint(bookDir, chapterNumber, {
+        output,
+        controlInput: {
+          ...reducedControlInput,
+          externalContext,
+          ...(writeInput.contextTrace ? { contextTrace: writeInput.contextTrace } : {}),
+        },
+        lengthSpec,
+        tokenUsage: totalUsage,
+      }).catch((error: unknown) => {
+        this.config.logger?.warn(`[resume] failed to write chapter checkpoint: ${String(error)}`);
+      });
+    }
     const writerCount = countChapterLength(output.content, lengthSpec.countingMode);
 
     // Token usage accumulator
-    let totalUsage: TokenUsageSummary = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let finalContent: string;
     let finalWordCount: number;
     let revised: boolean;
@@ -2375,6 +2438,7 @@ export class PipelineRunner {
       logSnapshotStage: () =>
         this.logStage(stageLanguage, { zh: "更新章节索引与快照", en: "updating chapter index and snapshots" }),
     });
+    await clearChapterResumeCheckpoint(bookDir, chapterNumber).catch(() => undefined);
 
     // 6. Send notification
     if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
