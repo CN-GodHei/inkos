@@ -4015,7 +4015,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   app.get("/api/v1/project/export", async (c) => {
     try {
+      const t0 = Date.now();
       const archive = await buildProjectArchive(root);
+      console.log(`[project-export] OK ${archive.length} bytes in ${Date.now() - t0}ms (root=${root})`);
       return new Response(new Uint8Array(archive), {
         headers: {
           "Content-Type": "application/zip",
@@ -4023,6 +4025,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         },
       });
     } catch (error) {
+      console.error("[project-export] FAILED:", error);
       return c.json({
         error: error instanceof Error ? error.message : "Project export failed",
       }, 500);
@@ -4046,10 +4049,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       return c.json({ error: `Archive exceeds ${MAX_PROJECT_UPLOAD_BYTES} bytes` }, 413);
     }
     try {
+      const t0 = Date.now();
       const result = await extractProjectArchive(root, parsed.buffer);
-      cachedConfig = await loadProjectConfig(root, { consumer: "studio" }).catch(() => cachedConfig);
-      return c.json({ ok: true, filesWritten: result.filesWritten });
+      console.log(
+        `[project-import] OK ${parsed.buffer.byteLength} bytes -> ${result.filesWritten} written / ${result.skippedFiles} skipped / ${result.totalEntries} entries in ${Date.now() - t0}ms (root=${root})`,
+      );
+      cachedConfig = await loadProjectConfig(root, { consumer: "studio" }).catch((e) => {
+        console.warn("[project-import] config reload failed (keeping previous):", e);
+        return cachedConfig;
+      });
+      return c.json({ ok: true, ...result });
     } catch (error) {
+      console.error("[project-import] FAILED:", error);
       return c.json({ error: error instanceof Error ? error.message : "Project import failed" }, 500);
     }
   });

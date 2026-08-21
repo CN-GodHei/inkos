@@ -47,24 +47,31 @@ export async function buildProjectArchive(projectRoot: string): Promise<Uint8Arr
 export async function extractProjectArchive(
   projectRoot: string,
   archive: Buffer | Uint8Array,
-): Promise<{ readonly filesWritten: number }> {
+): Promise<{ readonly filesWritten: number; readonly skippedFiles: number; readonly totalEntries: number }> {
   const zip = await JSZip.loadAsync(archive);
   let filesWritten = 0;
+  let skippedFiles = 0;
   for (const entry of Object.values(zip.files)) {
     if (entry.dir) continue;
     const relPath = normalizeArchivePath(entry.name);
-    if (!relPath) continue;
+    if (!relPath) {
+      skippedFiles += 1;
+      continue;
+    }
     const topLevel = relPath.split("/")[0] as string;
     const allowedRootFile = (PROJECT_ARCHIVE_ROOT_FILES as readonly string[]).includes(topLevel);
     const allowedDir = (PROJECT_ARCHIVE_INCLUDE_DIRS as readonly string[]).includes(topLevel);
-    if (!allowedRootFile && !allowedDir) continue;
+    if (!allowedRootFile && !allowedDir) {
+      skippedFiles += 1;
+      continue;
+    }
     const content = Buffer.from(await entry.async("uint8array"));
     const dest = join(projectRoot, ...relPath.split("/"));
     await mkdir(dirname(dest), { recursive: true });
     await writeFile(dest, content);
     filesWritten += 1;
   }
-  return { filesWritten };
+  return { filesWritten, skippedFiles, totalEntries: Object.values(zip.files).filter((entry) => !entry.dir).length };
 }
 
 async function addFileIfExists(zip: JSZip, projectRoot: string, relPath: string): Promise<void> {

@@ -55,6 +55,7 @@ const strings = {
   "project.exportFailed": { zh: "导出项目失败", en: "Project export failed" },
   "project.importFailed": { zh: "导入项目失败", en: "Project import failed" },
   "project.importSuccess": { zh: "项目导入成功", en: "Project imported" },
+  "project.importEmpty": { zh: "压缩包内没有识别到项目数据，请确认这是通过「导出项目」生成的文件", en: "No project data found in the archive. Make sure it was exported via 'Export Project'." },
 
   // Chapter Reader
   "reader.backToList": { zh: "返回列表", en: "Back to List" },

@@ -204,12 +204,16 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
         reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
         reader.readAsDataURL(file);
       });
-      const data = await fetchJson<{ filesWritten?: number }>("/project/import", {
+      const data = await fetchJson<{ filesWritten?: number; skippedFiles?: number }>("/project/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename: file.name, dataUrl }),
       });
-      alert(`${t("project.importSuccess")}（${data.filesWritten ?? 0} ${t("dash.chapters")}）`);
+      if ((data.filesWritten ?? 0) === 0) {
+        alert(t("project.importEmpty"));
+      } else {
+        alert(`${t("project.importSuccess")}（${data.filesWritten ?? 0} ${t("dash.chapters")}${data.skippedFiles ? `，跳过 ${data.skippedFiles}` : ""}）`);
+      }
       refetch();
     } catch (e) {
       alert(e instanceof Error ? e.message : t("project.importFailed"));
