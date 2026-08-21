@@ -74,6 +74,30 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
     onDelete();
   };
 
+  const handleExport = async () => {
+    setOpen(false);
+    try {
+      const res = await fetch(`/api/v1/books/${encodeURIComponent(bookId)}/export?format=txt`, { method: "GET" });
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error ?? t("book.exportFailed"));
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const fileName = /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? `${bookId}.txt`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : t("book.exportFailed"));
+    }
+  };
+
   return (
     <div ref={menuRef} className="relative">
       <button
@@ -91,15 +115,13 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
             <Settings size={14} className="text-muted-foreground" />
             {t("book.settings")}
           </button>
-          <a
-            href={`/api/v1/books/${bookId}/export?format=txt`}
-            download
-            onClick={() => setOpen(false)}
+          <button
+            onClick={handleExport}
             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-foreground hover:bg-secondary/50 transition-colors cursor-pointer"
           >
             <Download size={14} className="text-muted-foreground" />
             {t("book.export")}
-          </a>
+          </button>
           <div className="border-t border-border/50 my-1" />
           <button
             onClick={() => { setOpen(false); setConfirmDelete(true); }}

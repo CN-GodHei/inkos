@@ -5408,8 +5408,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           "Content-Disposition": `attachment; filename="${artifact.fileName}"`,
         },
       });
-    } catch {
-      return c.json({ error: "Export failed" }, 500);
+    } catch (error) {
+      return c.json({
+        error: error instanceof Error ? error.message : "Export failed",
+      }, 500);
     }
   });
 
