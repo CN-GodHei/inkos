@@ -360,7 +360,7 @@ ${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） |
 ${preWriteTable}
 
 === CHAPTER_TITLE ===
-(章节标题，不含"第X章"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)
+(章节标题，不含"第X章"，控制在 5-10 个字。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)
 
 === CHAPTER_CONTENT ===
 (正文内容，目标${lengthSpec.target}字，允许区间${lengthSpec.softMin}-${lengthSpec.softMax}字)
@@ -418,7 +418,7 @@ ${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） |
 ${preWriteTable}
 
 === CHAPTER_TITLE ===
-(章节标题，不含"第X章"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)
+(章节标题，不含"第X章"，控制在 5-10 个字。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)
 
 === CHAPTER_CONTENT ===
 (正文内容，目标${lengthSpec.target}字，允许区间${lengthSpec.softMin}-${lengthSpec.softMax}字)
@@ -493,7 +493,7 @@ ${resourceRow}| Hooks to resolve | Real hook_id (write none if absent) | Match t
 
 function buildEnglishContentBlocks(lengthSpec: LengthSpec): string {
   return `=== CHAPTER_TITLE ===
-(Chapter title, without "Chapter X". It must differ from existing titles; do not reuse the same or similar titles. If recent title history or high-frequency title words are provided, avoid repeated roots and overused imagery.)
+(Chapter title, without "Chapter X", keep it 5-10 words. It must differ from existing titles; do not reuse the same or similar titles. If recent title history or high-frequency title words are provided, avoid repeated roots and overused imagery.)
 
 === CHAPTER_CONTENT ===
 (Chapter prose. Target ${lengthSpec.target} words, acceptable range ${lengthSpec.softMin}-${lengthSpec.softMax} words.)`;
