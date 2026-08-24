@@ -19,6 +19,7 @@ import {
   Pencil,
   Save,
   Eye,
+  Copy,
 } from "lucide-react";
 
 interface ChapterData {
@@ -29,8 +30,18 @@ interface ChapterData {
 
 interface Nav {
   toBook: (id: string) => void;
+  toBookSettings: (id: string) => void;
   toDashboard: () => void;
   toChapter: (bookId: string, num: number) => void;
+}
+
+// 去掉「第1章 / Chapter 3 / 12.」这类章节序号前缀，只保留真正的标题名。
+function stripChapterNumberPrefix(input: string): string {
+  const stripped = input
+    .replace(/^\s*第\s*[0-9一二三四五六七八九十百千]+\s*章\s*/u, "")
+    .replace(/^\s*(?:chapter|ch\.?|chap\.?)\s*\d+\s*[:：.\-]?\s*/i, "")
+    .replace(/^\s*\d+\s*[:：.、\-]\s*/u, "");
+  return stripped.trim();
 }
 
 export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
@@ -51,6 +62,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   const [saving, setSaving] = useState(false);
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
   const [readingMode, setReadingMode] = useState(false);
+  const [copied, setCopied] = useState<"title" | "body" | null>(null);
   const endSentinelRef = useRef<HTMLDivElement | null>(null);
   const autoAdvanceTimerRef = useRef<number | null>(null);
 
@@ -104,7 +116,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           autoAdvanceTimerRef.current = null;
         }
       },
-      { rootMargin: "0px 0px 25% 0px" },
+      { rootMargin: "0px 0px 0px 0px" },
     );
     observer.observe(sentinel);
     return () => {
@@ -156,7 +168,8 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   // Split markdown content into title and body
   const lines = data.content.split("\n");
   const titleLine = lines.find((l) => l.startsWith("# "));
-  const title = titleLine?.replace(/^#\s*/, "") ?? `Chapter ${chapterNumber}`;
+  const rawTitle = titleLine?.replace(/^#\s*/, "") ?? `Chapter ${chapterNumber}`;
+  const title = stripChapterNumberPrefix(rawTitle) || rawTitle;
   const body = lines
     .filter((l) => l !== titleLine)
     .join("\n")
@@ -168,7 +181,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
       if (readingMode && nextNumber !== undefined) {
         nav.toChapter(bookId, nextNumber);
       } else {
-        nav.toBook(bookId);
+        nav.toBookSettings(bookId);
       }
     } catch (e) {
       alert(e instanceof Error ? e.message : "Approve failed");
@@ -181,11 +194,32 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
       if (readingMode && nextNumber !== undefined) {
         nav.toChapter(bookId, nextNumber);
       } else {
-        nav.toBook(bookId);
+        nav.toBookSettings(bookId);
       }
     } catch (e) {
       alert(e instanceof Error ? e.message : "Reject failed");
     }
+  };
+
+  const handleCopy = async (kind: "title" | "body", text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch {
+        return;
+      }
+    }
+    setCopied(kind);
+    window.setTimeout(() => setCopied(null), 2000);
   };
 
   const paragraphs = body.split(/\n\n+/).filter(Boolean);
@@ -257,7 +291,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             </button>
             <span className="text-border">/</span>
             <button
-              onClick={() => nav.toBook(bookId)}
+              onClick={() => nav.toBookSettings(bookId)}
               className="hover:text-primary transition-colors truncate max-w-[120px]"
             >
               {bookId}
@@ -286,7 +320,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             </button>
 
             <button
-              onClick={() => nav.toBook(bookId)}
+              onClick={() => nav.toBookSettings(bookId)}
               className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary text-muted-foreground rounded-xl hover:text-foreground hover:bg-secondary/80 transition-all border border-border/50"
             >
               <List size={14} />
@@ -347,7 +381,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           chapterNumber={chapterNumber}
           t={t}
           onChapterChanged={refetch}
-          onChapterDeleted={() => nav.toBook(bookId)}
+          onChapterDeleted={() => nav.toBookSettings(bookId)}
         />
       )}
 
@@ -358,13 +392,31 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
         <div className="absolute top-0 right-8 w-px h-full bg-primary/5 hidden md:block" />
 
         <header className="mb-16 text-center">
+          <div className="flex items-center justify-center gap-2 mb-8">
+            <button
+              type="button"
+              onClick={() => void handleCopy("title", title)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border border-border/50 bg-secondary/50 text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
+            >
+              <Copy size={13} />
+              {copied === "title" ? t("reader.copied") : t("reader.copyTitle")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCopy("body", body)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg border border-border/50 bg-secondary/50 text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
+            >
+              <Copy size={13} />
+              {copied === "body" ? t("reader.copied") : t("reader.copyBody")}
+            </button>
+          </div>
           <div className="flex items-center justify-center gap-2 text-muted-foreground/30 mb-8 select-none">
             <div className="h-px w-12 bg-border/40" />
             <BookOpen size={20} />
             <div className="h-px w-12 bg-border/40" />
           </div>
           <h1 className="text-4xl md:text-5xl font-serif font-medium italic text-foreground tracking-tight leading-tight">
-            {title}
+            {rawTitle}
           </h1>
           <div className="mt-8 flex items-center justify-center gap-4 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/60">
             <span>{t("reader.manuscriptPage")}</span>
@@ -383,7 +435,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
         ) : (
           <article className="prose prose-zinc dark:prose-invert max-w-none">
             {paragraphs.map((para, i) => (
-              <p key={i} className={`font-serif leading-[1.9] text-foreground/90 mb-8 first-letter:text-2xl first-letter:font-bold first-letter:text-primary/40 ${readingMode ? "text-xl md:text-2xl text-center" : "text-lg md:text-xl"}`}>
+              <p key={i} className={`font-serif leading-[1.9] text-foreground/90 mb-8 ${readingMode ? "text-xl md:text-2xl" : "text-lg md:text-xl"}`}>
                 {para}
               </p>
             ))}
@@ -418,7 +470,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
         </button>
         <button
           type="button"
-          onClick={() => nav.toBook(bookId)}
+          onClick={() => nav.toBookSettings(bookId)}
           className="flex items-center gap-1.5 text-sm font-bold text-muted-foreground/70 hover:text-primary transition-colors"
         >
           <List size={14} />
@@ -432,6 +484,26 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
         >
           {t("reader.nextChapter")}
           <ChevronRight size={16} />
+        </button>
+      </div>
+
+      {/* 底部操作：读完不用滚回顶部 */}
+      <div className="flex items-center justify-center gap-3 flex-wrap py-6 border-t border-border/40">
+        <button
+          type="button"
+          onClick={handleApprove}
+          className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-emerald-500/10 text-emerald-600 rounded-xl hover:bg-emerald-500 hover:text-white transition-all border border-emerald-500/30 shadow-sm"
+        >
+          <CheckCircle2 size={16} />
+          {t("reader.approve")}
+        </button>
+        <button
+          type="button"
+          onClick={handleReject}
+          className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/30 shadow-sm"
+        >
+          <XCircle size={16} />
+          {t("reader.reject")}
         </button>
       </div>
 
