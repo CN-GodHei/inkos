@@ -248,7 +248,7 @@ export function App() {
         </header>
 
         {/* Main Content Area */}
-        <main className="flex-1 relative overflow-y-auto scroll-smooth">
+        <main data-scroll-container className="flex-1 relative overflow-y-auto scroll-smooth">
           {route.page === "dashboard" && (
             <div className="max-w-4xl mx-auto px-4 py-8 md:px-12 lg:py-16 fade-in">
               <Dashboard nav={nav} sse={sse} theme={theme} t={t} />

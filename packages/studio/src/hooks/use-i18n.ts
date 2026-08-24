@@ -87,6 +87,14 @@ const strings = {
   "reader.saved": { zh: "已保存", en: "Saved" },
   "reader.rewriteComplete": { zh: "重写完成，旧稿已归档。", en: "Rewrite complete. The previous version was archived." },
   "reader.restoreComplete": { zh: "版本已恢复。", en: "Version restored." },
+  "reader.readingMode": { zh: "阅读模式", en: "Reading Mode" },
+  "reader.exitReadingMode": { zh: "退出", en: "Exit" },
+  "reader.prevChapter": { zh: "上一章", en: "Prev" },
+  "reader.nextChapter": { zh: "下一章", en: "Next" },
+  "reader.continueReading": { zh: "继续阅读下一章", en: "Continue to Next Chapter" },
+  "reader.autoContinueHint": { zh: "阅读模式已开启：滚动到本章末尾会自动续读下一章。", en: "Reading mode on: scrolling to the end auto-loads the next chapter." },
+  "reader.chapterProgress": { zh: "第 {n} 章 / 共 {total}", en: "Chapter {n} / {total}" },
+  "reader.endOfBook": { zh: "全书完", en: "End of Book" },
 
   // Book Create
   "create.title": { zh: "创建书籍", en: "Create Book" },
