@@ -295,7 +295,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           </button>
         </div>
       )}
-      <div className="flex items-end justify-between border-b border-border/40 pb-8">
+      <div className="flex flex-col md:flex-row items-start md:items-end justify-between border-b border-border/40 pb-8 gap-4">
         <div>
           <h1 className="font-serif text-4xl mb-2">{t("dash.title")}</h1>
           <p className="text-sm text-muted-foreground">{t("dash.subtitle")}</p>

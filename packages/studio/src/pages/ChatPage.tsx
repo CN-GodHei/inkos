@@ -983,7 +983,7 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         </div>
       ) : null}
       {needsPlayModeChoice ? null : (
-      <div className={`shrink-0 border-t border-border/40 px-4 py-3 transition-[padding] duration-200 ${worldPanelInsetClass}`}>
+      <div className={`shrink-0 border-t border-border/40 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] transition-[padding] duration-200 ${worldPanelInsetClass}`}>
         <div className="max-w-3xl mx-auto">
           <div className="flex items-start gap-2">
             <div className="relative flex-1 rounded-xl bg-secondary/30 transition-all">

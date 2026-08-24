@@ -90,11 +90,13 @@ interface Nav {
   toFilmStudio: (id: string) => void;
 }
 
-export function Sidebar({ nav, activePage, sse, t }: {
+export function Sidebar({ nav, activePage, sse, t, mobileOpen = false, onMobileClose }: {
   nav: Nav;
   activePage: string;
   sse: { messages: ReadonlyArray<SSEMessage> };
   t: TFunction;
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }) {
   const { data, refetch: refetchBooks, mutate: mutateBooks } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { data: filmsData, refetch: refetchFilms } = useApi<{ films: ReadonlyArray<{ projectId: string; title: string }> }>("/interactive-films");
@@ -284,7 +286,19 @@ export function Sidebar({ nav, activePage, sse, t }: {
   };
 
   return (
-    <aside className="w-[260px] shrink-0 border-r border-border bg-background/80 backdrop-blur-md flex flex-col h-full overflow-hidden select-none">
+    <>
+      {mobileOpen && (
+        <div
+          aria-hidden="true"
+          onClick={onMobileClose}
+          className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm md:hidden"
+        />
+      )}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex h-full w-[300px] max-w-[85vw] select-none flex-col overflow-hidden border-r border-border bg-background/80 backdrop-blur-md transition-transform duration-300 ease-out md:static md:z-auto md:shrink-0 md:w-[260px] md:max-w-none md:translate-x-0 md:transition-none ${
+          mobileOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
       {/* Logo Area */}
       <div className="px-6 py-8">
         <button
@@ -717,7 +731,8 @@ export function Sidebar({ nav, activePage, sse, t }: {
         onConfirm={() => void handleDeleteConfirm()}
         onCancel={() => setDeleteTarget(null)}
       />
-    </aside>
+      </aside>
+    </>
   );
 }
 
