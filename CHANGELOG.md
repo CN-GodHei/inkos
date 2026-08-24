@@ -2,6 +2,17 @@
 
 [English](CHANGELOG.en.md) | 中文
 
+## v2.0.1
+
+### Release Focus
+
+Studio 所有流水线操作（写章节、仿写、番外、导入母本等）现在默认使用聊天框里选择的模型：选择结果持久化到项目 `.inkos/active-model.json`，`buildPipelineConfig` 在未显式指定模型时优先读取它，并按所选 service 解析构建客户端；仿写创建会打印并广播所用模型。
+
+### Studio
+
+- 新增聊天模型选择持久化并同步到服务器，写章节 / 仿写 / 番外 / 导入母本等 pipeline 统一使用聊天框所选模型
+- 仿写创建记录并展示所用模型（服务端日志 + 导入页显示）
+
 ## v1.8.0
 
 ### Release Focus

@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "inkos",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Story Creation AI Agent for novels, short fiction, scripts, interactive worlds, and multilingual translation",
   "keywords": [

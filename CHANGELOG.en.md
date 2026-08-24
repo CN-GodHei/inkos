@@ -2,6 +2,17 @@
 
 [中文](CHANGELOG.md) | English
 
+## v2.0.1
+
+### Release Focus
+
+Studio pipeline operations (writing, imitation, side-story, canon import, ...) now default to the model selected in the chat box. The selection is persisted to `.inkos/active-model.json` and `buildPipelineConfig` prefers it whenever no explicit model/client is supplied, resolving the client from the selected service. Imitation creation logs and broadcasts the model used.
+
+### Studio
+
+- Persist the chat model selection and sync it to the server so pipeline operations use the same model the user picked in chat
+- Imitation creation records and surfaces the model used (server log + import page)
+
 ## v1.8.0
 
 ### Release Focus

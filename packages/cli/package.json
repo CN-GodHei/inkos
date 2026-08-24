@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "@cn-godhei/inkos",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "InkOS Story Creation AI Agent CLI and TUI for fiction, scripts, interactive worlds, and translation.",
   "keywords": [
     "story-creation-ai-agent",
