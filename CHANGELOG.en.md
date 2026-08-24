@@ -112,7 +112,7 @@ Major multilingual creation and long-task reliability release. InkOS gains a com
 
 ### Hotfix
 
-- Fixed `@actalk/inkos@1.6.2` / `@actalk/inkos-studio@1.6.2` leaking `workspace:*` into the registry manifest when published to npm; for Windows / npm global upgrades, install `1.6.3` directly or update to `latest`
+- Fixed `@cn-godhei/inkos@1.6.2` / `@cn-godhei/inkos-studio@1.6.2` leaking `workspace:*` into the registry manifest when published to npm; for Windows / npm global upgrades, install `1.6.3` directly or update to `latest`
 - Release validation now rejects `workspace:` dependencies in publishable manifests, preventing this class of install failure from recurring
 - The MiniMax official OpenAI-compatible integration adds a `MiniMax-M3` model card and sends `thinking: { "type": "disabled" }` by default for `MiniMax-M3*`, reducing the API's default behavior of returning thinking content
 

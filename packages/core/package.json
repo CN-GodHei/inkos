@@ -1,6 +1,6 @@
 {
-  "name": "@actalk/inkos-core",
-  "version": "1.8.0",
+  "name": "@cn-godhei/inkos-core",
+  "version": "2.0.0",
   "description": "InkOS pi-agent production harness for story creation, governed context, retrieval, review, and interactive worlds",
   "keywords": [
     "story-creation-ai-agent",
@@ -45,9 +45,12 @@
     "skills"
   ],
   "license": "AGPL-3.0-only",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Narcooo/inkos.git",
+    "url": "https://github.com/CN-GodHei/inkos.git",
     "directory": "packages/core"
   },
   "scripts": {

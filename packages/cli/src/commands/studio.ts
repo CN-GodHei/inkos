@@ -97,10 +97,10 @@ export async function resolveStudioLaunch(root: string): Promise<StudioLaunchSpe
   }
 
   const builtEntry = await firstAccessiblePath([
-    join(root, "node_modules", "@actalk", "inkos-studio", "dist", "api", "index.js"),
-    join(root, "node_modules", "@actalk", "inkos-studio", "server.cjs"),
-    join(cliPackageRoot, "node_modules", "@actalk", "inkos-studio", "dist", "api", "index.js"),
-    join(cliPackageRoot, "node_modules", "@actalk", "inkos-studio", "server.cjs"),
+    join(root, "node_modules", "@cn-godhei", "inkos-studio", "dist", "api", "index.js"),
+    join(root, "node_modules", "@cn-godhei", "inkos-studio", "server.cjs"),
+    join(cliPackageRoot, "node_modules", "@cn-godhei", "inkos-studio", "dist", "api", "index.js"),
+    join(cliPackageRoot, "node_modules", "@cn-godhei", "inkos-studio", "server.cjs"),
     join(cliPackageRoot, "..", "inkos-studio", "dist", "api", "index.js"),
     join(cliPackageRoot, "..", "inkos-studio", "server.cjs"),
   ]);

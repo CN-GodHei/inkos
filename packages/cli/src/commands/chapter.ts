@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { createInterface } from "node:readline";
-import { deleteLatestChapter, StateManager, syncChapterWordCounts } from "@actalk/inkos-core";
+import { deleteLatestChapter, StateManager, syncChapterWordCounts } from "@cn-godhei/inkos-core";
 import {
   formatChapterDeleteCancelled,
   formatChapterDeleteConfirm,

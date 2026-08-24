@@ -1,6 +1,6 @@
 {
   "name": "inkos",
-  "version": "1.8.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Story Creation AI Agent for novels, short fiction, scripts, interactive worlds, and multilingual translation",
   "keywords": [
@@ -19,9 +19,12 @@
     "cli"
   ],
   "license": "AGPL-3.0-only",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Narcooo/inkos"
+    "url": "https://github.com/CN-GodHei/inkos.git"
   },
   "scripts": {
     "build": "pnpm -r build",
@@ -39,6 +42,11 @@
     "pnpm": ">=9.0.0"
   },
   "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "msw",
+      "protobufjs"
+    ],
     "overrides": {
       "@mariozechner/pi-ai": "0.67.1",
       "@mariozechner/pi-agent-core": "0.67.1"

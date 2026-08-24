@@ -197,8 +197,8 @@ const logger = {
   error: vi.fn(),
 };
 
-vi.mock("@actalk/inkos-core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@actalk/inkos-core")>();
+vi.mock("@cn-godhei/inkos-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@cn-godhei/inkos-core")>();
   generatePlayImageMock.mockImplementation(actual.generatePlayImage);
 
   class MockSessionAlreadyMigratedError extends Error {
@@ -753,7 +753,7 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("uses the real core bookId validator in the Studio safety mock", async () => {
-    const { isSafeBookId } = await import("@actalk/inkos-core");
+    const { isSafeBookId } = await import("@cn-godhei/inkos-core");
 
     expect(vi.isMockFunction(isSafeBookId)).toBe(false);
     expect(isSafeBookId("demo-book")).toBe(true);
@@ -3733,7 +3733,7 @@ describe("createStudioServer daemon lifecycle", () => {
   // 走真实 transcript 文件验证：确认式生产任务的用户指令必须在任务开始时就
   // 写进 transcript（而不是任务完成后才补写），完成/失败时只追加助手工具消息。
   async function wireRealSessionTranscript() {
-    const actual = await vi.importActual<typeof import("@actalk/inkos-core")>("@actalk/inkos-core");
+    const actual = await vi.importActual<typeof import("@cn-godhei/inkos-core")>("@cn-godhei/inkos-core");
     appendManualSessionMessagesMock.mockImplementation(actual.appendManualSessionMessages);
     loadBookSessionMock.mockImplementation(
       (projectRoot: string, sessionId: string) => actual.loadBookSession(projectRoot, sessionId),
@@ -4146,7 +4146,7 @@ describe("createStudioServer daemon lifecycle", () => {
       createdAt: 1,
       updatedAt: 1,
     });
-    const core = await import("@actalk/inkos-core");
+    const core = await import("@cn-godhei/inkos-core");
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
 
@@ -6760,7 +6760,7 @@ describe("createStudioServer daemon lifecycle", () => {
     // Import into a fresh root and verify the book + config came back.
     const target = await mkdtemp(join(tmpdir(), "inkos-project-import-"));
     try {
-      const { extractProjectArchive } = await import("@actalk/inkos-core");
+      const { extractProjectArchive } = await import("@cn-godhei/inkos-core");
       await extractProjectArchive(target, zipBuffer);
       await expect(readFile(join(target, "inkos.json"), "utf-8")).resolves.toContain("provider");
       await expect(readFile(join(target, "books", "migrate-book", "chapters", "0001_Start.md"), "utf-8")).resolves.toBe("# Start\n");
@@ -6772,7 +6772,7 @@ describe("createStudioServer daemon lifecycle", () => {
   it("project/import extracts an uploaded archive into the project root", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
-    const { buildProjectArchive } = await import("@actalk/inkos-core");
+    const { buildProjectArchive } = await import("@cn-godhei/inkos-core");
     const source = await mkdtemp(join(tmpdir(), "inkos-project-upload-src-"));
     try {
       await mkdir(join(source, "books", "arrived"), { recursive: true });

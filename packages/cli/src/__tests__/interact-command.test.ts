@@ -39,7 +39,7 @@ const {
   })),
 }));
 
-vi.mock("@actalk/inkos-core", async () => ({
+vi.mock("@cn-godhei/inkos-core", async () => ({
   PipelineRunner: class PipelineRunnerMock {
     constructor(_config: unknown) {}
   },
