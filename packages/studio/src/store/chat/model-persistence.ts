@@ -1,3 +1,5 @@
+import { fetchJson } from "../../hooks/use-api";
+
 const MODEL_SELECTION_KEY = "inkos.chat.model-selection";
 
 export interface SavedModelSelection {
@@ -45,4 +47,28 @@ export function clearSavedModelSelection(): void {
   } catch {
     // best-effort
   }
+}
+
+/**
+ * Push the chat model selection to the server so every pipeline operation
+ * (writing, imitation, spinoff, canon import, ...) defaults to the same model.
+ * Best-effort: a failed sync must never break the local selection.
+ */
+export async function syncActiveModelToServer(model: string | null, service: string | null): Promise<void> {
+  if (!model || !service) return;
+  try {
+    await fetchJson("/active-model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, service }),
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+/** Sync whatever selection was persisted in localStorage (e.g. after a server restart). */
+export async function syncSavedModelSelectionToServer(): Promise<void> {
+  const saved = loadSavedModelSelection();
+  await syncActiveModelToServer(saved.model, saved.service);
 }

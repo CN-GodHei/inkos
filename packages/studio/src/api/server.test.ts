@@ -6846,6 +6846,27 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(initSpinoffBookMock).not.toHaveBeenCalled();
   });
 
+  it("active-model stores and returns the chat model selection", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const missing = await app.request("http://localhost/api/v1/active-model", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash" }),
+    });
+    expect(missing.status).toBe(400);
+
+    const saved = await app.request("http://localhost/api/v1/active-model", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek-v4-flash", service: "kkaiapi" }),
+    });
+    expect(saved.status).toBe(200);
+    await expect(saved.json()).resolves.toMatchObject({ ok: true });
+
+    const fetched = await app.request("http://localhost/api/v1/active-model");
+    await expect(fetched.json()).resolves.toMatchObject({ model: "deepseek-v4-flash", service: "kkaiapi" });
+  });
+
   it("imitation/init requires title+reference+idea and otherwise runs initImitationBook", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

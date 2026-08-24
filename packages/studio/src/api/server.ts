@@ -2714,6 +2714,61 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     },
   };
 
+  // Active model selection synced from the chat model selector. Persisted under
+  // the project state dir so every pipeline operation (writing, imitation,
+  // spinoff, canon import, ...) defaults to the model the user picked in chat.
+  const activeModelPath = join(root, ".inkos", "active-model.json");
+
+  async function readActiveModelSelection(): Promise<{ readonly model: string; readonly service: string } | null> {
+    try {
+      const raw = await readFile(activeModelPath, "utf-8");
+      const parsed = JSON.parse(raw) as { model?: unknown; service?: unknown };
+      if (typeof parsed.model === "string" && parsed.model.trim()
+        && typeof parsed.service === "string" && parsed.service.trim()) {
+        return { model: parsed.model.trim(), service: parsed.service.trim() };
+      }
+    } catch {
+      // Missing or corrupt file — treat as unset.
+    }
+    return null;
+  }
+
+  async function writeActiveModelSelection(selection: { readonly model: string; readonly service: string }): Promise<void> {
+    await mkdir(join(root, ".inkos"), { recursive: true });
+    await writeFile(activeModelPath, JSON.stringify(selection, null, 2), "utf-8");
+  }
+
+  async function buildActiveModelPipelineOverride(
+    currentConfig: ProjectConfig,
+  ): Promise<{ readonly client: ReturnType<typeof createLLMClient>; readonly model: string } | null> {
+    const active = await readActiveModelSelection();
+    if (!active) return null;
+    try {
+      const configuredEntry = await resolveConfiguredServiceEntry(root, active.service);
+      const baseUrl = await resolveConfiguredServiceBaseUrl(root, active.service);
+      const resolved = await resolveServiceModel(
+        active.service,
+        active.model,
+        root,
+        baseUrl,
+        configuredEntry?.apiFormat,
+      );
+      const client = createLLMClient({
+        ...currentConfig.llm,
+        service: configuredEntry?.service ?? active.service,
+        model: active.model,
+        apiKey: resolved.apiKey ?? "",
+        ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
+        ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
+        baseUrl: configuredEntry?.baseUrl ?? "",
+      } as never);
+      return { client, model: active.model };
+    } catch {
+      // Active model is not resolvable right now — callers fall back to config.llm.
+      return null;
+    }
+  }
+
   async function loadCurrentProjectConfig(
     options?: { readonly requireApiKey?: boolean },
   ): Promise<ProjectConfig> {
@@ -2764,9 +2819,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         }
       : sseSink;
     const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink] });
+    // Unless an explicit model/client was supplied, prefer the model the user
+    // selected in the chat model selector (synced to .inkos/active-model.json).
+    let client = overrides?.client ?? createLLMClient(currentConfig.llm);
+    let model = overrides?.model ?? currentConfig.llm.model;
+    if (!overrides?.model && !overrides?.client) {
+      const activeOverride = await buildActiveModelPipelineOverride(currentConfig);
+      if (activeOverride) {
+        client = activeOverride.client;
+        model = activeOverride.model;
+      }
+    }
     return {
-      client: overrides?.client ?? createLLMClient(currentConfig.llm),
-      model: overrides?.model ?? currentConfig.llm.model,
+      client,
+      model,
       projectRoot: root,
       defaultLLMConfig: currentConfig.llm,
       foundationReviewRetries: currentConfig.foundation?.reviewRetries ?? 2,
@@ -6320,11 +6386,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     if (await completeBookExists(state.bookDir(bookId))) {
       return c.json({ error: `Book "${bookId}" already exists` }, 409);
     }
-    broadcast("imitation:start", { bookId, title: body.title });
     bookCreateStatus.set(bookId, { status: "creating" });
     void (async () => {
       try {
-        const pipeline = new PipelineRunner(await buildPipelineConfig());
+        const pipelineConfig = await buildPipelineConfig();
+        pipelineConfig.logger?.info(`仿写创建「${body.title}」使用模型: ${pipelineConfig.model}`);
+        broadcast("imitation:start", { bookId, title: body.title, model: pipelineConfig.model });
+        const pipeline = new PipelineRunner(pipelineConfig);
         await pipeline.initImitationBook(bookConfig, body.referenceText, body.storyIdea, body.sourceName);
         const book = await loadStudioBookListSummary(state, bookId).catch(() => undefined);
         bookCreateStatus.delete(bookId);
@@ -6338,6 +6406,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       }
     })();
     return c.json({ status: "creating", bookId });
+  });
+
+  // --- Active model selection (synced from the chat model selector) ---
+
+  app.get("/api/v1/active-model", async (c) => {
+    const active = await readActiveModelSelection();
+    return c.json(active ?? { model: null, service: null });
+  });
+
+  app.post("/api/v1/active-model", async (c) => {
+    const body: { model?: unknown; service?: unknown } = await c.req.json().catch(() => ({}));
+    if (typeof body.model !== "string" || !body.model.trim()
+      || typeof body.service !== "string" || !body.service.trim()) {
+      return c.json({ error: "model and service are required" }, 400);
+    }
+    await writeActiveModelSelection({ model: body.model.trim(), service: body.service.trim() });
+    return c.json({ ok: true });
   });
 
   // --- Radar Scan ---

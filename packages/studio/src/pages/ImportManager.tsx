@@ -70,6 +70,7 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [activeRun, setActiveRun] = useState<ImportRun | null>(null);
+  const [imitationModel, setImitationModel] = useState<string | null>(null);
 
   // Chapters state
   const [chText, setChText] = useState("");
@@ -135,6 +136,14 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
       } : prev);
     }
   }, [activeRun, messages]);
+
+  useEffect(() => {
+    for (const message of messages) {
+      if (message.event !== "imitation:start") continue;
+      const data = message.data as { model?: string } | null;
+      if (data?.model) setImitationModel(data.model);
+    }
+  }, [messages]);
 
   const handleImportChapters = async () => {
     if (!chText.trim() || !chBookId) return;
@@ -492,6 +501,12 @@ export function ImportManager({ nav, theme, t, initialTab }: { nav: Nav; theme: 
         {status && (
           <div className={`text-sm px-3 py-2 rounded-lg ${status.startsWith("Error") ? "bg-destructive/10 text-destructive" : "bg-emerald-500/10 text-emerald-600"}`}>
             {status}
+          </div>
+        )}
+
+        {imitationModel && (
+          <div className="text-xs font-mono text-muted-foreground">
+            {tr("仿写使用模型", "Imitation model")}: {imitationModel}
           </div>
         )}
       </div>
