@@ -344,6 +344,27 @@ ${VALID_EN_BODY}
     expect(result.intentMarkdown).toContain("Planner warning");
   });
 
+  it("falls back to a degraded memo instead of throwing when the LLM call itself fails", async () => {
+    // A non-parse, non-abort provider failure (e.g. a hard auth/500 error) must
+    // never abort the whole chapter — it degrades to a deterministic memo.
+    const chatSpy = vi.spyOn(llmProvider, "chatCompletion").mockRejectedValue(
+      new Error("upstream returned 500 MODEL_NOT_AVAILABLE"),
+    );
+
+    const result = await makePlanner().planChapter({
+      book: makeBook(),
+      bookDir,
+      chapterNumber: 3,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.memo.chapter).toBe(3);
+    expect(result.memo.goal.length).toBeGreaterThan(0);
+    expect(result.memo.body).toContain("## 当前任务");
+    expect(result.memo.body).toContain("## Planner warning");
+    expect(result.intentMarkdown).toContain("Planner warning");
+  });
+
   // Phase hotfix 5: planner.intent.mustAvoid must come from the Phase 5
   // authoritative loader (story_frame frontmatter), not from raw
   // book_rules.md — for new-layout books the legacy file is just a shim.

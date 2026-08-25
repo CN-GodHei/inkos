@@ -1,5 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import type { LLMResponse } from "../llm/provider.js";
 import { BaseAgent } from "./base.js";
 import type { BookConfig } from "../models/book.js";
 import type { LengthSpec } from "../models/length-governance.js";
@@ -257,13 +258,30 @@ export class PlannerAgent extends BaseAgent {
     let lastError: PlannerParseError | undefined;
 
     for (let attempt = 0; attempt < MEMO_RETRY_LIMIT; attempt += 1) {
-      const response = await this.chat(
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: currentUserMessage },
-        ],
-        { temperature: 0.7 },
-      );
+      let response: LLMResponse;
+      try {
+        response = await this.chat(
+          [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: currentUserMessage },
+          ],
+          { temperature: 0.7 },
+        );
+      } catch (error) {
+        // The transport already retries transient 429/502/503/504 internally.
+        // If it still throws, the failure is either a hard provider/auth error or
+        // retries exhausted. Never let a single memo call abort the whole chapter:
+        // fall back to a deterministic memo instead. But always propagate a user
+        // cancellation so we don't mask an intentional stop.
+        if (this.ctx.signal?.aborted) {
+          throw error;
+        }
+        this.log?.warn(`[planner] memo LLM call failed (attempt ${attempt + 1}/${MEMO_RETRY_LIMIT}): ${error instanceof Error ? error.message : String(error)}`);
+        lastError = new PlannerParseError(
+          `memo LLM call failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        break;
+      }
 
       try {
         return parseMemo(response.content, input.chapterNumber, input.isGoldenOpening);

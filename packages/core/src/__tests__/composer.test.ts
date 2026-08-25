@@ -433,7 +433,7 @@ describe("ComposerAgent", () => {
     })).rejects.toThrow(/no compressible context compiler/);
   });
 
-  it("fails loudly when the compressible context compiler returns empty output", async () => {
+  it("falls back to deterministic truncation when the compressible context compiler returns empty output", async () => {
     await writeFile(
       join(storyDir, "chapter_summaries.md"),
       [
@@ -446,7 +446,7 @@ describe("ComposerAgent", () => {
       "utf-8",
     );
 
-    await expect(composeGovernedChapter({
+    const result = await composeGovernedChapter({
       book,
       bookDir,
       chapterNumber: 4,
@@ -456,7 +456,55 @@ describe("ComposerAgent", () => {
         reservedOutputTokens: 0,
       },
       compressibleContextCompiler: async () => "   ",
-    })).rejects.toThrow(/compiler returned empty output/);
+    });
+
+    const protectedEntry = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "story/author_intent.md",
+    );
+    const summariesEntry = result.contextPackage.selectedContext.find((entry) =>
+      entry.source.startsWith("story/chapter_summaries.md#"),
+    );
+    // Protected context is preserved, compressible context is truncated to fit
+    // the budget rather than aborting the whole chapter.
+    expect(protectedEntry).toBeDefined();
+    expect(summariesEntry).toBeDefined();
+    expect(result.trace.notes).toContain("compressed-context-fallback-truncation");
+    expect(result.trace.compression?.compiledSource).toBe("runtime/deterministic-truncated-context");
+  });
+
+  it("falls back to deterministic truncation when the compressible context compiler throws", async () => {
+    await writeFile(
+      join(storyDir, "chapter_summaries.md"),
+      [
+        "# Chapter Summaries",
+        "",
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        `| 1 | ${"旧案".repeat(1200)} | Lin Yue | Old archive noise | None | none | tight | investigation |`,
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const result = await composeGovernedChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+      contextBudget: {
+        contextWindowTokens: 900,
+        reservedOutputTokens: 0,
+      },
+      compressibleContextCompiler: async () => {
+        throw new Error("transient upstream failure");
+      },
+    });
+
+    const protectedEntry = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "story/author_intent.md",
+    );
+    expect(protectedEntry).toBeDefined();
+    expect(result.trace.notes).toContain("compressed-context-fallback-truncation");
+    expect(result.trace.compression?.compiledSource).toBe("runtime/deterministic-truncated-context");
   });
 
   it("selects relevant legacy outline sections instead of protecting whole legacy files", async () => {

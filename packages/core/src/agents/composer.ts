@@ -228,7 +228,8 @@ async function applyContextBudgetIfNeeded(params: {
     budgetTokens: compileBudget,
     sources: compressibleEntries.map((entry) => entry.source),
   });
-  let compiled: string;
+  let compiled = "";
+  let compilerFailed = false;
   try {
     compiled = (await params.compiler({
       chapterNumber: params.chapterNumber,
@@ -239,29 +240,63 @@ async function applyContextBudgetIfNeeded(params: {
       compressibleEntries,
     })).trim();
   } catch (error) {
+    compilerFailed = true;
     params.onContextCompression?.({
       category: "story_context",
       phase: "error",
-      message: error instanceof Error ? error.message : String(error),
+      message: `compressible context compiler failed; falling back to deterministic truncation: ${error instanceof Error ? error.message : String(error)}`,
       protectedTokens,
       compressibleTokens,
       budgetTokens: compileBudget,
       sources: compressibleEntries.map((entry) => entry.source),
     });
-    throw error;
   }
-  if (!compiled) {
+  if (!compilerFailed && !compiled) {
     params.onContextCompression?.({
       category: "story_context",
       phase: "error",
-      message: "Compressible context compiler returned empty output.",
+      message: "Compressible context compiler returned empty output; falling back to deterministic truncation.",
       protectedTokens,
       compressibleTokens,
       budgetTokens: compileBudget,
       sources: compressibleEntries.map((entry) => entry.source),
     });
-    throw new Error("Compressible context compiler returned empty output.");
+    compilerFailed = true;
   }
+
+  // Never let a failed/empty compression abort the whole chapter. The
+  // compressible entries are by definition lower priority than protected
+  // context, so truncating them deterministically is always safe.
+  if (compilerFailed) {
+    const truncated = deterministicTruncateContext(protectedEntries, compressibleEntries, availableInputTokens);
+    params.onContextCompression?.({
+      category: "story_context",
+      phase: "end",
+      message: "used deterministic truncation fallback",
+      protectedTokens,
+      compressibleTokens,
+      budgetTokens: availableInputTokens,
+      sources: truncated.selectedContext.map((entry) => entry.source),
+    });
+    return {
+      contextPackage: ContextPackageSchema.parse({
+        chapter: params.contextPackage.chapter,
+        selectedContext: truncated.selectedContext,
+      }),
+      notes: ["compressed-context-fallback-truncation", ...truncated.notes],
+      compression: {
+        compiledSource: "runtime/deterministic-truncated-context",
+        protectedSources: protectedEntries.map((entry) => entry.source),
+        compressedSources: truncated.droppedSources,
+        protectedTokens,
+        compressibleTokens: estimateSelectedContextTokens(truncated.selectedContext.filter(
+          (entry) => !isProtectedContextSource(entry.source),
+        )),
+        budgetTokens: availableInputTokens,
+      },
+    };
+  }
+
   params.onContextCompression?.({
     category: "story_context",
     phase: "end",
@@ -293,6 +328,75 @@ async function applyContextBudgetIfNeeded(params: {
       budgetTokens: compileBudget,
     },
   };
+}
+
+/**
+ * Deterministic fallback when the semantic compression compiler is unavailable
+ * or fails: keep every protected entry, then fit as many compressible entries
+ * as possible into the token budget, truncating each excerpt that still fits
+ * and dropping the rest. Never exceeds the budget.
+ */
+function deterministicTruncateContext(
+  protectedEntries: ReadonlyArray<ContextPackage["selectedContext"][number]>,
+  compressibleEntries: ReadonlyArray<ContextPackage["selectedContext"][number]>,
+  budgetTokens: number,
+): { readonly selectedContext: ContextPackage["selectedContext"]; readonly droppedSources: string[]; readonly notes: string[] } {
+  const selectedContext: ContextPackage["selectedContext"] = [];
+  const droppedSources: string[] = [];
+  const notes: string[] = [];
+  let usedTokens = 0;
+
+  const estimateEntry = (entry: ContextPackage["selectedContext"][number]): number =>
+    estimateTextTokens([entry.source, entry.reason, entry.excerpt].filter(Boolean).join("\n"));
+
+  for (const entry of protectedEntries) {
+    selectedContext.push(entry);
+    usedTokens += estimateEntry(entry);
+  }
+
+  for (const entry of compressibleEntries) {
+    const fullTokens = estimateEntry(entry);
+    const remaining = budgetTokens - usedTokens;
+    if (fullTokens <= remaining) {
+      selectedContext.push(entry);
+      usedTokens += fullTokens;
+      continue;
+    }
+    if (remaining <= 0) {
+      droppedSources.push(entry.source);
+      continue;
+    }
+    // Truncate the excerpt to fit the remaining budget (minus a small ceiling
+    // for source+reason which we keep intact).
+    const overhead = estimateTextTokens([entry.source, entry.reason].filter(Boolean).join("\n"));
+    const excerptBudget = Math.max(0, remaining - overhead);
+    if (excerptBudget <= 0) {
+      droppedSources.push(entry.source);
+      continue;
+    }
+    const truncatedExcerpt = truncateTextToTokens(entry.excerpt ?? "", excerptBudget);
+    if (!truncatedExcerpt) {
+      droppedSources.push(entry.source);
+      continue;
+    }
+    selectedContext.push({ ...entry, excerpt: truncatedExcerpt });
+    usedTokens = estimateEntry({ ...entry, excerpt: truncatedExcerpt });
+    notes.push(`truncated:${entry.source}`);
+  }
+
+  return { selectedContext, droppedSources, notes };
+}
+
+function truncateTextToTokens(text: string, maxTokens: number): string {
+  if (maxTokens <= 0) return "";
+  if (estimateTextTokens(text) <= maxTokens) return text;
+  // Coarse truncation by character ratio, then shrink until it fits.
+  const maxChars = Math.max(1, Math.floor((text.length / Math.max(1, estimateTextTokens(text))) * maxTokens));
+  let result = text.slice(0, maxChars);
+  while (result.length > 0 && estimateTextTokens(result) > maxTokens) {
+    result = result.slice(0, Math.max(1, Math.floor(result.length / 2)));
+  }
+  return result;
 }
 
 function estimateSelectedContextTokens(entries: ContextPackage["selectedContext"]): number {
