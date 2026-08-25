@@ -23,6 +23,7 @@ import {
   deleteBookSession,
   migrateBookSession,
   loadInProgressRequest,
+  failInProgressRequest,
   SessionAlreadyMigratedError,
   abortAgentSession,
   runAgentSession,
@@ -2571,6 +2572,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   // 已删除会话的 sessionId：删除会话时中止其生产任务，任务随后的错误持久化
   // 不能把快照文件重新写回来（给已删除的会话"还魂"）。同名会话重新创建时移除标记。
   const deletedSessionIds = new Set<string>();
+  // 正在处理中的会话级请求（自由文本 /agent 轮次）。确认式生产任务另有
+  // activeConfirmedTasks 追踪。用于对账：transcript 里"被中断、从未结束"的
+  // request_started，如果本进程并没有在跑这个会话的请求，就改写为终态，
+  // 避免前端每次刷新都把旧指令当成"正在执行"。
+  const activeAgentRequestSessions = new Set<string>();
 
   // 已删除会话不再追加 transcript 消息：appendManualSessionMessages 底层的
   // appendTranscriptEvents 是 mkdir + appendFile，会把已删除会话的 sessions
@@ -4698,7 +4704,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const taskRunning = task?.execution.status === "running" || task?.execution.status === "processing";
     // 一轮聊天/任务正在运行（尚未 request_committed）时，其它设备打开本会话也能
     // 看到"处理中"状态与用户输入，而不是看起来什么都没发生。
-    const inProgress = await loadInProgressRequest(root, sessionId);
+    let inProgress = await loadInProgressRequest(root, sessionId);
+    // 对账：transcript 里有一条"被中断、从未结束"的 request_started（服务重启 /
+    // 请求被取消遗留），但本进程并没有在跑这个会话的请求 → 改写为终态，避免
+    // 前端每次刷新都把旧指令当成"正在执行"（只在读取时惰性修复一次）。
+    if (inProgress && !activeAgentRequestSessions.has(sessionId)) {
+      await failInProgressRequest(
+        root,
+        sessionId,
+        inProgress.requestId,
+        pick(
+          await currentProjectLanguage(),
+          "任务已中断：服务在运行期间重启或请求被取消。请重新发起。",
+          "Task interrupted: the server restarted or the request was cancelled while running. Please start again.",
+        ),
+      );
+      inProgress = null;
+    }
     const streaming = taskRunning || Boolean(inProgress);
     return c.json({
       session,
@@ -4849,6 +4871,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     broadcast("agent:start", { instruction, activeBookId, sessionId, actionSource, requestedIntent, requestedSkills, attachments: attachments.length });
 
     try {
+      activeAgentRequestSessions.add(sessionId);
       // Load config + create LLM client (pipeline created after model resolution)
       const config = await loadCurrentProjectConfig({ requireApiKey: false });
       const client = createLLMClient(config.llm);
@@ -5507,6 +5530,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         { error: { code: failure.code, message: failure.message } },
         failure.status,
       );
+    } finally {
+      activeAgentRequestSessions.delete(sessionId);
     }
   });
 

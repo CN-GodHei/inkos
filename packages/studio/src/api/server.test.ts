@@ -385,6 +385,7 @@ vi.mock("@cn-godhei/inkos-core", async (importOriginal) => {
     createAndPersistBookSession: createAndPersistBookSessionMock,
     loadBookSession: loadBookSessionMock,
     loadInProgressRequest: actual.loadInProgressRequest,
+    failInProgressRequest: actual.failInProgressRequest,
     persistBookSession: persistBookSessionMock,
     appendBookSessionMessage: appendBookSessionMessageMock,
     appendManualSessionMessages: appendManualSessionMessagesMock,
@@ -3888,25 +3889,37 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
-  it("reports an in-progress chat request via /sessions/:id for other devices", async () => {
-    // 模拟：PC 发起的一轮聊天/任务还没完成（transcript 只有未提交的 request_started）。
+  it("reports an in-progress chat request via /sessions/:id while a request is genuinely running", async () => {
+    // 模拟：PC 发起的一轮自由文本聊天还在处理中（/agent 请求在途，request_started
+    // 已写入但尚未 request_committed）。
     const actual = await wireRealSessionTranscript();
-    await actual.createAndPersistBookSession(root, null, "inprogress-chat-session", "chat");
+    await actual.createAndPersistBookSession(root, null, "live-chat-session", "chat");
+    let resolveAgent!: (value: unknown) => void;
+    runAgentSessionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAgent = resolve;
+    }));
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const pendingRequest = app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: "帮我写下一章", sessionId: "live-chat-session", sessionKind: "chat" }),
+    });
+    // 请求进入处理（activeAgentRequestSessions 已登记、runAgentSession 在途）后再读取。
+    await vi.waitFor(() => expect(runAgentSessionMock).toHaveBeenCalled());
     await actual.appendTranscriptEvent(root, {
       type: "request_started",
       version: 1,
-      sessionId: "inprogress-chat-session",
-      requestId: "running-req",
+      sessionId: "live-chat-session",
+      requestId: "live-req",
       seq: 2,
-      timestamp: 5,
+      timestamp: Date.now(),
       sessionKind: "chat",
       input: "帮我写下一章",
     });
 
-    const { createStudioServer } = await import("./server.js");
-    const app = createStudioServer(cloneProjectConfig() as never, root);
-
-    const response = await app.request("http://localhost/api/v1/sessions/inprogress-chat-session");
+    const response = await app.request("http://localhost/api/v1/sessions/live-chat-session");
     expect(response.status).toBe(200);
     const body = await response.json() as {
       streaming?: boolean;
@@ -3916,12 +3929,49 @@ describe("createStudioServer daemon lifecycle", () => {
     // 其它设备打开该会话时能看到"处理中"状态与用户输入。
     expect(body.streaming).toBe(true);
     expect(body.inProgress).toMatchObject({
-      requestId: "running-req",
+      requestId: "live-req",
       input: "帮我写下一章",
-      timestamp: 5,
     });
     // 未提交的请求不进入已落盘消息（由前端按 inProgress 补用户气泡）。
     expect(body.session.messages).toEqual([]);
+
+    resolveAgent({ responseText: "", messages: [] });
+    await pendingRequest;
+  });
+
+  it("reconciles a stale dangling request so refresh does not replay an old command", async () => {
+    // 模拟：某轮请求被中断（服务重启/被取消），transcript 遗留了一条 request_started
+    // 没有 request_committed 也没有 request_failed，且本进程并没有在跑该会话的请求。
+    const actual = await wireRealSessionTranscript();
+    await actual.createAndPersistBookSession(root, null, "stale-req-session", "chat");
+    await actual.appendTranscriptEvent(root, {
+      type: "request_started",
+      version: 1,
+      sessionId: "stale-req-session",
+      requestId: "stale-req",
+      seq: 2,
+      timestamp: 5,
+      sessionKind: "chat",
+      input: "开写第一卷",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    // 第一次读取：被对账成终态，不再上报 streaming/inProgress。
+    const first = await app.request("http://localhost/api/v1/sessions/stale-req-session");
+    const firstBody = await first.json() as { streaming?: boolean; inProgress?: unknown };
+    expect(firstBody.streaming).toBeUndefined();
+    expect(firstBody.inProgress).toBeUndefined();
+
+    // 第二次读取：对账结果已落盘，依旧不是 in-progress（幂等）。
+    const second = await app.request("http://localhost/api/v1/sessions/stale-req-session");
+    const secondBody = await second.json() as { streaming?: boolean; inProgress?: unknown };
+    expect(secondBody.streaming).toBeUndefined();
+
+    // transcript 里这条请求已变成 request_failed。
+    const events = await actual.readTranscriptEvents(root, "stale-req-session");
+    expect(events.some((event) => event.type === "request_failed" && event.requestId === "stale-req")).toBe(true);
   });
 
   it("does not report a finished chat request as in-progress", async () => {

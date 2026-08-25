@@ -342,6 +342,7 @@ export {
 export {
   appendManualSessionMessages,
   appendTranscriptEvent,
+  failInProgressRequest,
   sessionsDir,
   readTranscriptEvents,
   nextTranscriptSeq,

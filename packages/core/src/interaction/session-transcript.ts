@@ -57,6 +57,28 @@ export async function appendTranscriptEvent(
   await appendTranscriptEvents(projectRoot, event.sessionId, () => [event]);
 }
 
+/**
+ * 把一条"从未结束"的请求（request_started 无 request_committed / request_failed）
+ * 改写为 request_failed。用于把服务重启/请求被取消后遗留的悬挂请求对账成终态，
+ * 否则前端每次刷新都会把旧指令当成正在执行。
+ */
+export async function failInProgressRequest(
+  projectRoot: string,
+  sessionId: string,
+  requestId: string,
+  error: string,
+): Promise<void> {
+  await appendTranscriptEvents(projectRoot, sessionId, ({ nextSeq }) => [{
+    type: "request_failed",
+    version: 1,
+    sessionId,
+    requestId,
+    seq: nextSeq,
+    timestamp: Date.now(),
+    error,
+  }]);
+}
+
 export async function appendTranscriptEvents(
   projectRoot: string,
   sessionId: string,
