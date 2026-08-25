@@ -1428,4 +1428,201 @@ describe("chat message actions", () => {
     resolveAgent({ response: "聊完了。", session: { sessionId, sessionKind: "short" } });
     await sent;
   });
+
+  it("restores a running task discovered from /tasks/active into a not-yet-loaded session", async () => {
+    const store = createTestStore();
+    fetchJson.mockResolvedValueOnce({
+      session: { sessionId: "remote-short-session", bookId: null, sessionKind: "short", title: null },
+    });
+    const sessionId = await store.getState().createSession(null, "short");
+    fetchJson.mockReset();
+    fetchJson.mockResolvedValueOnce({
+      tasks: [
+        {
+          version: 1,
+          sessionId,
+          requestedIntent: "short_run",
+          updatedAt: 20,
+          execution: {
+            id: "remote-task-1",
+            tool: "short_fiction_run",
+            label: "生成短篇",
+            status: "running",
+            startedAt: 10,
+            logs: ["正在生成大纲"],
+          },
+        },
+      ],
+    });
+    fetchJson.mockResolvedValueOnce({
+      session: { sessionId, bookId: null, sessionKind: "short", title: null, messages: [] },
+      task: {
+        version: 1,
+        sessionId,
+        requestedIntent: "short_run",
+        updatedAt: 20,
+        execution: {
+          id: "remote-task-1",
+          tool: "short_fiction_run",
+          label: "生成短篇",
+          status: "running",
+          startedAt: 10,
+          logs: ["正在生成大纲"],
+        },
+      },
+    });
+
+    await store.getState().restoreActiveTasks();
+
+    expect(fetchJson).toHaveBeenCalledWith("/tasks/active");
+    expect(fetchJson).toHaveBeenCalledWith(`/sessions/${sessionId}`);
+    expect(store.getState().sessions[sessionId]).toMatchObject({ isStreaming: true });
+    expect(store.getState().sessions[sessionId]?.messages[0]?.toolExecutions?.[0]).toMatchObject({
+      id: "remote-task-1",
+      status: "running",
+      logs: ["正在生成大纲"],
+    });
+    expect(fakeEventSources).toHaveLength(1);
+    expect(fakeEventSources[0]?.url).toBe(`/api/v1/events?sessionId=${encodeURIComponent(sessionId)}`);
+  });
+
+  it("restoreActiveTasks merges into an already-loaded session without refetching its detail", async () => {
+    const store = createTestStore();
+    fetchJson.mockResolvedValueOnce({
+      session: { sessionId: "remote-short-session", bookId: null, sessionKind: "short", title: null },
+    });
+    const sessionId = await store.getState().createSession(null, "short");
+    store.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: {
+          ...state.sessions[sessionId]!,
+          messages: [{ role: "user", content: "写一篇短篇", timestamp: 1 }],
+        },
+      },
+    }));
+    fetchJson.mockReset();
+    fetchJson.mockResolvedValueOnce({
+      tasks: [
+        {
+          version: 1,
+          sessionId,
+          requestedIntent: "short_run",
+          updatedAt: 20,
+          execution: {
+            id: "remote-task-2",
+            tool: "short_fiction_run",
+            label: "生成短篇",
+            status: "running",
+            startedAt: 10,
+          },
+        },
+      ],
+    });
+
+    await store.getState().restoreActiveTasks();
+
+    expect(fetchJson).not.toHaveBeenCalledWith(`/sessions/${sessionId}`);
+    expect(store.getState().sessions[sessionId]).toMatchObject({ isStreaming: true });
+    expect(store.getState().sessions[sessionId]?.messages.some(
+      (message) => message.toolExecutions?.some((execution) => execution.id === "remote-task-2"),
+    )).toBe(true);
+    expect(fakeEventSources).toHaveLength(1);
+  });
+
+  it("attachTaskStream is a no-op when the session already has a session-scoped stream", async () => {
+    const store = createTestStore();
+    const sessionId = await store.getState().createDraftSession(null, "short");
+    const stream = new FakeEventSource(`/api/v1/events?sessionId=${sessionId}`);
+    store.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: {
+          ...state.sessions[sessionId]!,
+          isStreaming: true,
+          stream: stream as unknown as EventSource,
+        },
+      },
+    }));
+    fakeEventSources.length = 0;
+
+    store.getState().attachTaskStream(sessionId, 10);
+
+    expect(fakeEventSources).toHaveLength(0);
+    expect(store.getState().sessions[sessionId]?.stream).toBe(stream);
+  });
+
+  it("restores an in-progress chat turn (user bubble + stream) and re-fetches on completion", async () => {
+    const store = createTestStore();
+    fetchJson.mockResolvedValueOnce({
+      session: { sessionId: "follow-session", bookId: null, sessionKind: "chat", title: null },
+    });
+    const sessionId = await store.getState().createSession(null, "chat");
+    fetchJson.mockReset();
+    // 打开会话时，服务端报告：一轮聊天正在运行，用户输入是"帮我写下一章"。
+    fetchJson.mockResolvedValueOnce({
+      session: { sessionId, bookId: null, sessionKind: "chat", title: null, messages: [] },
+      streaming: true,
+      inProgress: { requestId: "running-req", input: "帮我写下一章", timestamp: 5 },
+    });
+
+    await store.getState().loadSessionDetail(sessionId);
+
+    // 用户气泡 + isStreaming + followLive + 会话级流都恢复了。
+    const runtime = store.getState().sessions[sessionId]!;
+    expect(runtime).toMatchObject({ isStreaming: true, followLive: true });
+    expect(runtime.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "帮我写下一章", timestamp: 5 }),
+    ]);
+    expect(fakeEventSources).toHaveLength(1);
+
+    // 聊天轮结束（agent:complete）：跟随端重拉一次已落盘消息，覆盖本地恢复内容。
+    fetchJson.mockResolvedValueOnce({
+      session: {
+        sessionId,
+        bookId: null,
+        sessionKind: "chat",
+        title: null,
+        messages: [
+          { role: "user", content: "帮我写下一章", timestamp: 5 },
+          { role: "assistant", content: "好的，下一章写好了。", timestamp: 6 },
+        ],
+      },
+    });
+    fakeEventSources[0]?.emit("agent:complete", { sessionId });
+
+    await vi.waitFor(() => {
+      expect(fetchJson).toHaveBeenCalledWith(`/sessions/${sessionId}`);
+    });
+    const after = store.getState().sessions[sessionId]!;
+    expect(after).toMatchObject({ isStreaming: false, followLive: false });
+    expect(after.messages.map((message) => message.content)).toEqual(["帮我写下一章", "好的，下一章写好了。"]);
+  });
+
+  it("does not append a duplicate user bubble when the committed transcript already has it", async () => {
+    const store = createTestStore();
+    fetchJson.mockResolvedValueOnce({
+      session: { sessionId: "dedup-session", bookId: null, sessionKind: "chat", title: null },
+    });
+    const sessionId = await store.getState().createSession(null, "chat");
+    fetchJson.mockReset();
+    // 上一轮已落盘的用户消息与 inProgress.input 相同（同一轮，只是还没完成）。
+    fetchJson.mockResolvedValueOnce({
+      session: {
+        sessionId,
+        bookId: null,
+        sessionKind: "chat",
+        title: null,
+        messages: [{ role: "user", content: "继续写", timestamp: 1 }],
+      },
+      streaming: true,
+      inProgress: { requestId: "r2", input: "继续写", timestamp: 1 },
+    });
+
+    await store.getState().loadSessionDetail(sessionId);
+
+    const users = store.getState().sessions[sessionId]!.messages.filter((message) => message.role === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]?.content).toBe("继续写");
+  });
 });

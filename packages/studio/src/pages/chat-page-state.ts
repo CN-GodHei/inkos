@@ -21,7 +21,6 @@ export interface ChatPageSessionSummary {
 }
 
 const BOOK_CREATE_SESSION_KEY = "inkos.book-create.session-id";
-const PROJECT_CHAT_SESSION_KEY = "inkos.project-chat.session-id";
 
 export function getBookCreateSessionId(): string | null {
   return globalThis.localStorage?.getItem(BOOK_CREATE_SESSION_KEY) ?? null;
@@ -33,14 +32,6 @@ export function setBookCreateSessionId(sessionId: string): void {
 
 export function clearBookCreateSessionId(): void {
   globalThis.localStorage?.removeItem(BOOK_CREATE_SESSION_KEY);
-}
-
-export function getProjectChatSessionId(): string | null {
-  return globalThis.localStorage?.getItem(PROJECT_CHAT_SESSION_KEY) ?? null;
-}
-
-export function setProjectChatSessionId(sessionId: string): void {
-  globalThis.localStorage?.setItem(PROJECT_CHAT_SESSION_KEY, sessionId);
 }
 
 export function filterModelGroups(
@@ -118,6 +109,16 @@ export function pickProjectChatSessionId(
   );
   return projectSurfaceSessions.find((session) => session.messageCount > 0)?.sessionId
     ?? projectSurfaceSessions[0]?.sessionId
+    ?? null;
+}
+
+/** 建书模式的"当前会话"从服务端列表派生：优先最近一次仍有消息的 book-create 会话。 */
+export function pickBookCreateSessionId(
+  sessions: ReadonlyArray<ChatPageSessionSummary>,
+): string | null {
+  const bookCreateSessions = sessions.filter((session) => session.sessionKind === "book-create");
+  return bookCreateSessions.find((session) => session.messageCount > 0)?.sessionId
+    ?? bookCreateSessions[0]?.sessionId
     ?? null;
 }
 

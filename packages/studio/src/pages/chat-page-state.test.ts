@@ -4,11 +4,10 @@ import {
   filterModelGroups,
   getBookCreateSessionId,
   getChatScrollBehavior,
-  getProjectChatSessionId,
+  pickBookCreateSessionId,
   pickModelSelection,
   pickProjectChatSessionId,
   setBookCreateSessionId,
-  setProjectChatSessionId,
   isChatScrollNearBottom,
   shouldShowPlayChoicePanel,
 } from "./chat-page-state";
@@ -61,13 +60,6 @@ describe("book-create session localStorage helpers", () => {
   it("clearBookCreateSessionId is safe when key doesn't exist", () => {
     clearBookCreateSessionId();
     expect(getBookCreateSessionId()).toBeNull();
-  });
-
-  it("keeps project chat session separate from book-create session", () => {
-    setBookCreateSessionId("book-create-session");
-    setProjectChatSessionId("project-chat-session");
-    expect(getBookCreateSessionId()).toBe("book-create-session");
-    expect(getProjectChatSessionId()).toBe("project-chat-session");
   });
 });
 
@@ -212,6 +204,32 @@ describe("pickProjectChatSessionId", () => {
 
   it("returns null when there is no project chat session", () => {
     expect(pickProjectChatSessionId([])).toBeNull();
+  });
+});
+
+describe("pickBookCreateSessionId", () => {
+  it("prefers the newest book-create session that already has messages", () => {
+    expect(pickBookCreateSessionId([
+      { sessionId: "empty-latest", sessionKind: "book-create", messageCount: 0 },
+      { sessionId: "in-progress", sessionKind: "book-create", messageCount: 4 },
+    ])).toBe("in-progress");
+  });
+
+  it("never picks non-book-create sessions", () => {
+    expect(pickBookCreateSessionId([
+      { sessionId: "chat-session", sessionKind: "chat", messageCount: 9 },
+      { sessionId: "book-session", sessionKind: "book", messageCount: 2 },
+    ])).toBeNull();
+  });
+
+  it("falls back to the newest empty book-create session", () => {
+    expect(pickBookCreateSessionId([
+      { sessionId: "empty-latest", sessionKind: "book-create", messageCount: 0 },
+    ])).toBe("empty-latest");
+  });
+
+  it("returns null when there is no book-create session", () => {
+    expect(pickBookCreateSessionId([])).toBeNull();
   });
 });
 

@@ -337,12 +337,19 @@ export function attachSessionStreamListeners({
       if (!runtime || runtime.isChatStreaming) return;
       if (hasAnyInFlightExecution(runtime.messages)) return;
       streamEs.close();
+      const wasFollowingLive = runtime.followLive === true;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, () => ({
           isStreaming: false,
           stream: null,
+          followLive: false,
         })),
       }));
+      // 非发起端跟随的聊天轮结束（已 request_committed）：重拉一次已落盘的完整
+      // 消息，把本地恢复出来的部分内容（用户气泡 + 部分流式内容）换成完整会话。
+      if (wasFollowingLive) {
+        void get().loadSessionDetail(sessionId, { replaceMessages: true });
+      }
     } catch {
       // ignore
     }

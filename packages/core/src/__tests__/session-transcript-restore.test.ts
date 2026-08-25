@@ -7,6 +7,8 @@ import {
   adaptRestoredAgentMessagesForModel,
   appendRestoredHistoryBoundary,
   deriveBookSessionFromTranscript,
+  findInProgressRequest,
+  loadInProgressRequest,
   restoreAgentMessagesFromTranscript,
   TOOL_RESULT_BRIDGE_TEXT,
 } from "../interaction/session-transcript-restore.js";
@@ -2203,5 +2205,66 @@ describe("session transcript restore", () => {
       ],
     });
     expect(session?.messages.some((message) => message.content === "模型复述的重复场景。")).toBe(false);
+  });
+
+  it("findInProgressRequest returns the latest uncommitted request input", async () => {
+    await appendTranscriptEvent(projectRoot, {
+      type: "request_started",
+      version: 1,
+      sessionId: "s1",
+      requestId: "done-r",
+      seq: 1,
+      timestamp: 1,
+      sessionKind: "chat",
+      input: "上一轮已完成的指令",
+    });
+    await appendTranscriptEvent(projectRoot, {
+      type: "request_committed",
+      version: 1,
+      sessionId: "s1",
+      requestId: "done-r",
+      seq: 2,
+      timestamp: 2,
+    });
+    await appendTranscriptEvent(projectRoot, {
+      type: "request_started",
+      version: 1,
+      sessionId: "s1",
+      requestId: "running-r",
+      seq: 3,
+      timestamp: 3,
+      sessionKind: "chat",
+      input: "正在处理的指令",
+    });
+
+    await expect(loadInProgressRequest(projectRoot, "s1")).resolves.toEqual({
+      requestId: "running-r",
+      input: "正在处理的指令",
+      timestamp: 3,
+    });
+  });
+
+  it("findInProgressRequest returns null when every request is finished", async () => {
+    await appendTranscriptEvent(projectRoot, {
+      type: "request_started",
+      version: 1,
+      sessionId: "s1",
+      requestId: "done-r",
+      seq: 1,
+      timestamp: 1,
+      sessionKind: "chat",
+      input: "指令",
+    });
+    await appendTranscriptEvent(projectRoot, {
+      type: "request_committed",
+      version: 1,
+      sessionId: "s1",
+      requestId: "done-r",
+      seq: 2,
+      timestamp: 2,
+    });
+
+    await expect(loadInProgressRequest(projectRoot, "s1")).resolves.toBeNull();
+    expect(findInProgressRequest([])).toBeNull();
   });
 });

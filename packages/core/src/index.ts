@@ -352,6 +352,8 @@ export {
   cleanRestoredAgentMessages,
   committedMessageEvents,
   deriveBookSessionFromTranscript,
+  findInProgressRequest,
+  loadInProgressRequest,
   restoreAgentMessagesFromTranscript,
 } from "./interaction/session-transcript-restore.js";
 export {

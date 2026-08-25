@@ -4,7 +4,6 @@ import type { SSEMessage } from "../hooks/use-sse";
 import { applyBookCollectionEvent, shouldRefetchBookCollections, shouldRefetchDaemonStatus } from "../hooks/use-book-activity";
 import type { TFunction } from "../hooks/use-i18n";
 import { tr } from "../lib/app-language";
-import { setProjectChatSessionId } from "../pages/chat-page-state";
 import { useChatStore } from "../store/chat";
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
@@ -242,15 +241,13 @@ export function Sidebar({ nav, activePage, sse, t, mobileOpen = false, onMobileC
   const openProjectChatSession = (sessionId: string) => {
     setInput("");
     activateSession(sessionId);
-    setProjectChatSessionId(sessionId);
     nav.toChat();
     void loadSessionDetail(sessionId);
   };
 
   const handleCreateProjectChatSession = () => {
     setProjectChatExpanded(true);
-    const sessionId = createDraftSession(null, "chat");
-    setProjectChatSessionId(sessionId);
+    createDraftSession(null, "chat");
     setInput("");
     nav.toChat();
   };
@@ -264,8 +261,7 @@ export function Sidebar({ nav, activePage, sse, t, mobileOpen = false, onMobileC
     setProjectChatExpanded(true);
     // Play mode (分支互动 = guided / 自由互动 = open) is now decided here at the
     // launcher, not via an in-chat button.
-    const sessionId = createDraftSession(null, kind, playMode);
-    setProjectChatSessionId(sessionId);
+    createDraftSession(null, kind, playMode);
     setInput("");
     nav.toChat();
   };

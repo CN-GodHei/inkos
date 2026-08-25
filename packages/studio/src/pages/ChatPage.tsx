@@ -52,12 +52,9 @@ import {
   type ChatPageModelPreference,
   filterModelGroups,
   getChatScrollBehavior,
-  getBookCreateSessionId,
-  getProjectChatSessionId,
+  pickBookCreateSessionId,
   pickProjectChatSessionId,
   pickModelSelection,
-  setBookCreateSessionId,
-  setProjectChatSessionId,
   isChatScrollNearBottom,
   shouldShowPlayChoicePanel,
 } from "./chat-page-state";
@@ -173,6 +170,28 @@ function cancelScrollFrame(id: ScrollFrameId): void {
     return;
   }
   globalThis.clearTimeout(id);
+}
+
+/** 当前激活的是前端内存里的草稿会话（bookId 为空且尚未落盘）：保持它，不重新选择。 */
+function isSurfaceDraftSessionActive(): boolean {
+  const state = useChatStore.getState();
+  const session = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
+  return Boolean(session && session.bookId === null && session.isDraft);
+}
+
+/** 会话种类是否属于当前页面模式（book-create 只匹配 book-create，其余归项目聊天面）。 */
+function sessionKindMatchesMode(
+  sessionKind: ChatSessionKind | undefined,
+  mode: NonNullable<ChatPageProps["mode"]>,
+): boolean {
+  if (mode === "book-create") return sessionKind === "book-create";
+  return !sessionKind
+    || sessionKind === "chat"
+    || sessionKind === "short"
+    || sessionKind === "play"
+    || sessionKind === "script"
+    || sessionKind === "storyboard"
+    || sessionKind === "interactive-film";
 }
 
 function SkillPickerPanel({
@@ -499,17 +518,16 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
     autoScrollPinnedRef.current = true;
   }, [activeSessionId]);
 
-  // Entering a book loads its latest session; book-create mode persists its orphan session in localStorage.
+  // Entering a book loads its latest session; book-create / project-chat modes derive
+  // their "current session" from the server session list instead of per-browser
+  // localStorage, so a refreshed page or another device lands on the same session.
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
-      if (!activeBookId && mode === "project-chat") {
-        const state = useChatStore.getState();
-        const currentSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
-        if (currentSession?.bookId === null && currentSession.isDraft) {
-          return;
-        }
+      // 草稿会话：当前激活的是前端内存里的 draft，等第一条消息落盘后再交给服务端。
+      if (!activeBookId && isSurfaceDraftSessionActive()) {
+        return;
       }
 
       if (activeBookId) {
@@ -533,42 +551,38 @@ export function ChatPage({ activeBookId, mode = activeBookId ? "book" : "book-cr
         return;
       }
 
-      const existingId = mode === "project-chat"
-        ? getProjectChatSessionId()
-        : getBookCreateSessionId();
-      if (existingId) {
-        await loadSessionDetail(existingId);
+      // 当前激活的会话已经属于本模式（且已加载过消息）：SPA 内导航回来时直接恢复，
+      // 不重新从服务端选择，避免打断正在进行的会话。刷新 / 换设备后 store 为空，
+      // 走到下面由服务端列表派生。
+      const state = useChatStore.getState();
+      const activeSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
+      if (
+        activeSession
+        && activeSession.bookId === null
+        && !activeSession.isDraft
+        && activeSession.messages.length > 0
+        && sessionKindMatchesMode(activeSession.sessionKind, mode)
+      ) {
+        await loadSessionDetail(activeSession.sessionId);
         if (cancelled) return;
-
-        const state = useChatStore.getState();
-        const session = state.sessions[existingId];
-        if (session && session.bookId === null && (mode !== "project-chat" || session.messages.length > 0)) {
-          activateSession(existingId);
-          return;
-        }
+        activateSession(activeSession.sessionId);
+        return;
       }
 
-      if (mode === "project-chat") {
-        const projectSessions = await loadSessionList(null);
-        if (cancelled) return;
+      // "当前会话"由服务端列表派生：任何设备刷新 / 打开都落到同一个最近会话。
+      const sessions = await loadSessionList(null);
+      if (cancelled) return;
 
-        const reusableSessionId = pickProjectChatSessionId(projectSessions);
-        if (reusableSessionId) {
-          activateSession(reusableSessionId);
-          await loadSessionDetail(reusableSessionId);
-          if (!cancelled) setProjectChatSessionId(reusableSessionId);
-          return;
-        }
+      const reusableSessionId = mode === "book-create"
+        ? pickBookCreateSessionId(sessions)
+        : pickProjectChatSessionId(sessions);
+      if (reusableSessionId) {
+        activateSession(reusableSessionId);
+        await loadSessionDetail(reusableSessionId);
+        return;
       }
 
-      const newSessionId = await createSession(null, mode === "book-create" ? "book-create" : "chat");
-      if (!cancelled) {
-        if (mode === "project-chat") {
-          setProjectChatSessionId(newSessionId);
-        } else {
-          setBookCreateSessionId(newSessionId);
-        }
-      }
+      await createSession(null, mode === "book-create" ? "book-create" : "chat");
     })();
 
     return () => {

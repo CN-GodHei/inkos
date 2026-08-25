@@ -201,6 +201,7 @@ export function createSessionRuntime(input: {
     stream: null,
     isStreaming: false,
     isChatStreaming: false,
+    followLive: false,
     lastError: null,
     isDraft: input.isDraft ?? false,
   };

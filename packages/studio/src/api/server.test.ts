@@ -384,6 +384,7 @@ vi.mock("@cn-godhei/inkos-core", async (importOriginal) => {
     getBuiltinGenresDir: actual.getBuiltinGenresDir,
     createAndPersistBookSession: createAndPersistBookSessionMock,
     loadBookSession: loadBookSessionMock,
+    loadInProgressRequest: actual.loadInProgressRequest,
     persistBookSession: persistBookSessionMock,
     appendBookSessionMessage: appendBookSessionMessageMock,
     appendManualSessionMessages: appendManualSessionMessagesMock,
@@ -3729,6 +3730,78 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("lists only genuinely-running production tasks from /api/v1/tasks/active", async () => {
+    let resolveInitBook!: () => void;
+    initBookMock.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveInitBook = resolve;
+    }));
+    loadBookSessionMock.mockResolvedValue({
+      sessionId: "active-list-session",
+      bookId: null,
+      sessionKind: "book-create",
+      title: null,
+      messages: [],
+      events: [],
+      draftRounds: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    // 磁盘上放一个"旧进程遗留"的 running 快照：本进程没有它的 AbortController，
+    // /tasks/active 必须把它对账成终态并从列表排除，而不是当作运行中任务返回。
+    await saveStudioTaskSnapshot(root, {
+      version: 1,
+      sessionId: "orphan-running-session",
+      requestedIntent: "short_run",
+      updatedAt: 20,
+      execution: {
+        id: "orphan-task-1",
+        tool: "short_fiction_run",
+        label: "生成短篇",
+        status: "running",
+        startedAt: 10,
+      },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const pendingTask = app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "创建《运行中列表》。",
+        sessionId: "active-list-session",
+        sessionKind: "book-create",
+        actionSource: "button",
+        requestedIntent: "create_book",
+        actionPayload: { createBook: { title: "运行中列表", language: "zh" } },
+      }),
+    });
+
+    await vi.waitFor(async () => {
+      const task = await loadStudioTaskSnapshot(root, "active-list-session");
+      expect(task?.execution.status).toBe("running");
+    });
+
+    const response = await app.request("http://localhost/api/v1/tasks/active");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.tasks).toHaveLength(1);
+    expect(body.tasks[0]).toMatchObject({
+      sessionId: "active-list-session",
+      execution: { tool: "sub_agent", agent: "architect", status: "running" },
+    });
+
+    // 孤儿快照被对账成终态并从列表排除。
+    await expect(loadStudioTaskSnapshot(root, "orphan-running-session")).resolves.toMatchObject({
+      execution: { id: "orphan-task-1", status: "error" },
+    });
+
+    await writeCompleteBookFixture(root, "运行中列表", "运行中列表");
+    resolveInitBook();
+    await pendingTask;
+  });
+
   // 下面三个用例把 appendManualSessionMessages / loadBookSession 接回真实实现，
   // 走真实 transcript 文件验证：确认式生产任务的用户指令必须在任务开始时就
   // 写进 transcript（而不是任务完成后才补写），完成/失败时只追加助手工具消息。
@@ -3813,6 +3886,74 @@ describe("createStudioServer daemon lifecycle", () => {
       tool: "short_fiction_run",
       status: "completed",
     });
+  });
+
+  it("reports an in-progress chat request via /sessions/:id for other devices", async () => {
+    // 模拟：PC 发起的一轮聊天/任务还没完成（transcript 只有未提交的 request_started）。
+    const actual = await wireRealSessionTranscript();
+    await actual.createAndPersistBookSession(root, null, "inprogress-chat-session", "chat");
+    await actual.appendTranscriptEvent(root, {
+      type: "request_started",
+      version: 1,
+      sessionId: "inprogress-chat-session",
+      requestId: "running-req",
+      seq: 2,
+      timestamp: 5,
+      sessionKind: "chat",
+      input: "帮我写下一章",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/sessions/inprogress-chat-session");
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      streaming?: boolean;
+      inProgress?: { requestId: string; input: string; timestamp: number };
+      session: { messages: unknown[] };
+    };
+    // 其它设备打开该会话时能看到"处理中"状态与用户输入。
+    expect(body.streaming).toBe(true);
+    expect(body.inProgress).toMatchObject({
+      requestId: "running-req",
+      input: "帮我写下一章",
+      timestamp: 5,
+    });
+    // 未提交的请求不进入已落盘消息（由前端按 inProgress 补用户气泡）。
+    expect(body.session.messages).toEqual([]);
+  });
+
+  it("does not report a finished chat request as in-progress", async () => {
+    const actual = await wireRealSessionTranscript();
+    await actual.createAndPersistBookSession(root, null, "finished-chat-session", "chat");
+    await actual.appendTranscriptEvent(root, {
+      type: "request_started",
+      version: 1,
+      sessionId: "finished-chat-session",
+      requestId: "done-req",
+      seq: 2,
+      timestamp: 5,
+      sessionKind: "chat",
+      input: "写完了",
+    });
+    await actual.appendTranscriptEvent(root, {
+      type: "request_committed",
+      version: 1,
+      sessionId: "finished-chat-session",
+      requestId: "done-req",
+      seq: 3,
+      timestamp: 6,
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/sessions/finished-chat-session");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { streaming?: boolean; inProgress?: unknown };
+    expect(body.streaming).toBeUndefined();
+    expect(body.inProgress).toBeUndefined();
   });
 
   it("keeps real-time transcript order when a chat round lands during the production task", async () => {

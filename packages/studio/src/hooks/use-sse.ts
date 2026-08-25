@@ -56,6 +56,11 @@ export const STUDIO_SSE_EVENTS = [
   "radar:start",
   "radar:complete",
   "radar:error",
+  // 后台生产任务事件：全局订阅，让非发起端（另一台设备 / 另一标签页）也能
+  // 实时看到并收尾运行中的任务。已有会话级流（发起端）的会话由会话流处理。
+  "tool:start",
+  "tool:end",
+  "task:snapshot",
   "log",
   "llm:progress",
   "ping",

@@ -362,6 +362,42 @@ export function committedMessageEvents(events: TranscriptEvent[], sessionKind?: 
     .sort((a, b) => a.seq - b.seq);
 }
 
+export interface InProgressTranscriptRequest {
+  readonly requestId: string;
+  readonly input: string;
+  readonly timestamp: number;
+}
+
+/**
+ * 找出 transcript 里"最新一个还没结束（未 request_committed / request_failed）的请求"。
+ * 用户在 PC 发起一轮聊天/任务时，这个请求正在运行中；其它设备打开同一会话时，
+ * 服务端据此告诉前端"本会话有正在处理的内容"并回放用户输入，让前端能显示
+ * "处理中"状态与用户消息，而不是看起来什么都没发生。
+ */
+export function findInProgressRequest(events: TranscriptEvent[]): InProgressTranscriptRequest | null {
+  const finished = new Set(
+    events
+      .filter((event) => event.type === "request_committed" || event.type === "request_failed")
+      .map((event) => event.requestId),
+  );
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.type !== "request_started") continue;
+    if (!finished.has(event.requestId)) {
+      return { requestId: event.requestId, input: event.input, timestamp: event.timestamp };
+    }
+  }
+  return null;
+}
+
+export async function loadInProgressRequest(
+  projectRoot: string,
+  sessionId: string,
+): Promise<InProgressTranscriptRequest | null> {
+  const events = await readTranscriptEvents(projectRoot, sessionId);
+  return findInProgressRequest(events);
+}
+
 function requestKindMap(events: TranscriptEvent[]): Map<string, SessionKind | undefined> {
   return new Map(
     events

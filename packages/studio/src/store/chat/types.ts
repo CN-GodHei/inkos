@@ -107,6 +107,14 @@ export interface SessionResponse {
   };
   readonly activeBookId?: string;
   readonly task?: StudioTaskSnapshot;
+  // 会话里有一轮聊天/任务正在运行（尚未落盘完成）。非发起端据此显示"处理中"
+  // 状态并打开会话级流，实时跟进 PC 正在处理的内容。
+  readonly streaming?: boolean;
+  readonly inProgress?: {
+    readonly requestId?: string;
+    readonly input: string;
+    readonly timestamp: number;
+  };
 }
 
 export interface StudioTaskSnapshot {
@@ -171,6 +179,9 @@ export interface SessionRuntime {
   // isChatStreaming 只表示聊天轮本身在流式中；后台任务运行期间它是 false，
   // 用户仍可继续发消息。
   readonly isChatStreaming: boolean;
+  // 非发起端通过 loadSessionDetail 恢复"正在处理中的聊天轮"时置 true：该会话的
+  // 会话级流由服务端快照恢复而来，聊天轮结束后需要重拉一次已落盘的完整消息。
+  readonly followLive?: boolean;
   readonly lastError: string | null;
   // 上一条失败的聊天轮发送记录：请求失败（fetch 拒绝、/agent 返回 error 等）时写入，
   // 新一轮发送开始时清除。用户主动停止与后台生产任务轮的失败不记录
@@ -221,7 +232,15 @@ export interface MessageActions {
   setSessionPlayMode: (sessionId: string, playMode: PlayMode) => void;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
-  loadSessionDetail: (sessionId: string) => Promise<void>;
+  // replaceMessages：非发起端跟随聊天轮结束后重拉已落盘的完整消息（覆盖本地
+  // 恢复出来的部分内容）；false 时保持"本地已有消息优先"避免打断进行中的发送。
+  loadSessionDetail: (sessionId: string, opts?: { readonly replaceMessages?: boolean }) => Promise<void>;
+  // 为会话打开一条会话级 SSE（/api/v1/events?sessionId=...）并挂上流监听。
+  // 已有会话级流时是 no-op；被全局任务事件（tool:start / task:snapshot）与
+  // restoreActiveTasks 调用，让非发起端也能实时看到并收尾运行中的任务。
+  attachTaskStream: (sessionId: string, streamTs?: number) => void;
+  // 加载时从服务端拉取"仍在本进程运行的后台生产任务"，恢复任务卡并打开会话级流。
+  restoreActiveTasks: () => Promise<void>;
   sendMessage: (sessionId: string, text: string, options?: SendMessageOptions) => Promise<void>;
   // 用 lastFailedSend 记录的原样参数重发上一条失败的消息；无记录或聊天轮流式中时不做任何事。
   retryLastSend: (sessionId: string) => Promise<void>;

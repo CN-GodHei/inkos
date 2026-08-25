@@ -22,6 +22,7 @@ import {
   renameBookSession,
   deleteBookSession,
   migrateBookSession,
+  loadInProgressRequest,
   SessionAlreadyMigratedError,
   abortAgentSession,
   runAgentSession,
@@ -2657,6 +2658,34 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     return task ? activeConfirmedTasks.get(task.execution.id) : undefined;
   };
 
+  // 列出当前真正在运行的后台生产任务快照：扫描 .inkos/tasks 逐条对账，只保留
+  // 本进程仍持有 AbortController 的 running/processing 任务。前端在加载时调用它，
+  // 以便任何客户端（PC / 移动端）都能发现并恢复"别的端发起、仍在本进程运行"的任务。
+  const listActiveRunningTaskSnapshots = async (): Promise<StudioTaskSnapshot[]> => {
+    const dir = join(root, ".inkos", "tasks");
+    let files: string[];
+    try {
+      files = await readdir(dir);
+    } catch {
+      return [];
+    }
+    const out: StudioTaskSnapshot[] = [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      let sessionId: string;
+      try {
+        sessionId = decodeURIComponent(file.slice(0, -".json".length));
+      } catch {
+        continue;
+      }
+      const task = await loadReconciledTaskSnapshot(sessionId);
+      if (!task) continue;
+      const running = task.execution.status === "running" || task.execution.status === "processing";
+      if (running && activeConfirmedTasks.has(task.execution.id)) out.push(task);
+    }
+    return out;
+  };
+
   app.use("/*", cors());
 
   // Structured error handler — ApiError returns typed JSON, others return 500
@@ -4654,12 +4683,29 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     return c.json({ sessions });
   });
 
+  // 运行中的后台生产任务快照列表：任何客户端加载时调用，用于恢复/展示别的端
+  // 发起、仍在本进程运行的任务（页面刷新、PC 与移动端之间状态同步）。
+  app.get("/api/v1/tasks/active", async (c) => {
+    const tasks = await listActiveRunningTaskSnapshots();
+    return c.json({ tasks });
+  });
+
   app.get("/api/v1/sessions/:sessionId", async (c) => {
     const sessionId = c.req.param("sessionId");
     const session = await loadBookSession(root, sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
     const task = await loadReconciledTaskSnapshot(sessionId);
-    return c.json({ session, ...(task ? { task } : {}) });
+    const taskRunning = task?.execution.status === "running" || task?.execution.status === "processing";
+    // 一轮聊天/任务正在运行（尚未 request_committed）时，其它设备打开本会话也能
+    // 看到"处理中"状态与用户输入，而不是看起来什么都没发生。
+    const inProgress = await loadInProgressRequest(root, sessionId);
+    const streaming = taskRunning || Boolean(inProgress);
+    return c.json({
+      session,
+      ...(streaming ? { streaming: true } : {}),
+      ...(task ? { task } : {}),
+      ...(inProgress ? { inProgress } : {}),
+    });
   });
 
   app.post("/api/v1/sessions", async (c) => {

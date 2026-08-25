@@ -9,6 +9,7 @@ import type {
   SendMessageOptions,
   SessionResponse,
   SessionSummary,
+  StudioTaskSnapshot,
 } from "../../types";
 import { fetchJson } from "../../../../hooks/use-api";
 import { tr } from "../../../../lib/app-language";
@@ -389,11 +390,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
-  loadSessionDetail: async (sessionId) => {
+  loadSessionDetail: async (sessionId, opts) => {
     // 草稿会话：磁盘上还没有文件，直接跳过远端拉取。
     const existing = get().sessions[sessionId];
     if (existing?.isDraft) return;
-    if (existing?.isStreaming && existing.stream) return;
+    if (existing?.isStreaming && existing.stream && !opts?.replaceMessages) return;
 
     try {
       const data = await fetchJson<SessionResponse>(`/sessions/${sessionId}`);
@@ -403,15 +404,32 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       const persistedMessages = detail.messages ? deserializeMessages(detail.messages) : [];
       const task = data.task;
       const taskRunning = task?.execution.status === "running" || task?.execution.status === "processing";
+      const inProgress = data.inProgress;
       let restoredMessages: ReadonlyArray<ReturnType<typeof deserializeMessages>[number]> = persistedMessages;
       if (task) restoredMessages = mergeTaskExecution(restoredMessages, task.execution);
+      // 非发起端打开正在处理中的会话：把用户输入补成用户气泡，让"有一条指令在
+      // 跑"可见。request_started 是每次发送的第一条事件，不会和已落盘消息重复。
+      if (inProgress?.input) {
+        const alreadyHas = restoredMessages.some(
+          (message) => message.role === "user" && message.content === inProgress.input,
+        );
+        if (!alreadyHas) {
+          restoredMessages = [
+            ...restoredMessages,
+            { role: "user", content: inProgress.input, timestamp: inProgress.timestamp },
+          ];
+        }
+      }
       const messages = restoredMessages;
       const restoredResolutions = deriveResolvedProposals(messages);
+      const streaming = taskRunning || Boolean(inProgress);
 
       set((state) => {
         const runtime = state.sessions[detailSessionId];
         const nextBookId = detail.bookId ?? runtime?.bookId ?? null;
-        const baseMessages = runtime?.messages.length ? runtime.messages : messages;
+        const baseMessages = opts?.replaceMessages || !runtime?.messages.length
+          ? messages
+          : runtime.messages;
         const nextMessages = task ? mergeTaskExecution(baseMessages, task.execution) : baseMessages;
         return {
           sessions: {
@@ -429,7 +447,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
               playMode: detail.playMode ?? runtime?.playMode,
               title: detail.title ?? runtime?.title ?? null,
               messages: nextMessages,
-              isStreaming: taskRunning,
+              isStreaming: streaming,
+              followLive: streaming ? Boolean(inProgress) : false,
             },
           },
           sessionIdsByBook: {
@@ -446,23 +465,54 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         };
       });
 
-      if (taskRunning && task) {
-        const current = get().sessions[detailSessionId];
-        current?.stream?.close();
-        const streamEs = new EventSource(`/api/v1/events?sessionId=${encodeURIComponent(detailSessionId)}`);
-        set((state) => ({
-          sessions: updateSession(state.sessions, detailSessionId, () => ({ stream: streamEs, isStreaming: true })),
-        }));
-        attachSessionStreamListeners({
-          sessionId: detailSessionId,
-          streamTs: task.execution.startedAt,
-          streamEs,
-          set,
-          get,
-        });
+      if (streaming) {
+        const streamTs = task?.execution.startedAt ?? inProgress?.timestamp ?? Date.now();
+        get().attachTaskStream(detailSessionId, streamTs);
       }
     } catch {
       // ignore
+    }
+  },
+
+  attachTaskStream: (sessionId, streamTs) => {
+    const current = get().sessions[sessionId];
+    if (!current || (current.isStreaming && current.stream)) return;
+    current.stream?.close();
+    const startedAt = streamTs ?? Date.now();
+    const streamEs = new EventSource(`/api/v1/events?sessionId=${encodeURIComponent(sessionId)}`);
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, () => ({ stream: streamEs, isStreaming: true })),
+    }));
+    attachSessionStreamListeners({ sessionId, streamTs: startedAt, streamEs, set, get });
+  },
+
+  restoreActiveTasks: async () => {
+    let tasks: ReadonlyArray<StudioTaskSnapshot>;
+    try {
+      const data = await fetchJson<{ tasks: ReadonlyArray<StudioTaskSnapshot> }>("/tasks/active");
+      tasks = data.tasks ?? [];
+    } catch {
+      return;
+    }
+    for (const task of tasks) {
+      const execution = task.execution;
+      const running = execution.status === "running" || execution.status === "processing";
+      if (!running) continue;
+      const runtime = get().sessions[task.sessionId];
+      if (runtime?.stream) continue;
+      if (runtime && runtime.messages.length > 0) {
+        // 会话已加载但还没有会话级流：直接合并任务卡并开流。
+        set((state) => ({
+          sessions: updateSession(state.sessions, task.sessionId, (session) => ({
+            messages: mergeTaskExecution(session.messages, execution),
+            isStreaming: true,
+          })),
+        }));
+        get().attachTaskStream(task.sessionId, execution.startedAt);
+        continue;
+      }
+      // 会话尚未加载：loadSessionDetail 会合并任务卡、置 isStreaming 并开流。
+      void get().loadSessionDetail(task.sessionId);
     }
   },
 
