@@ -394,6 +394,11 @@ const SERVICE_CHAT_PROBE_TIMEOUT_MS = 8_000;
 const DOCTOR_LLM_PROBE_BUDGET_MS = 9_000;
 const MAX_DISCOVERED_MODELS_TO_PING = 2;
 const MAX_GENERIC_FALLBACK_MODELS_TO_PING = 2;
+// 自由文本聊天轮超过这个时长仍无 request_committed / request_failed 就视为卡死：
+// 即使服务端进程还登记着该会话的请求（/agent 一直挂着），读取时也把它对账成
+// 终态，避免云端旧数据每次打开都显示"正在执行"。确认式生产任务走任务快照，
+// 不依赖这里的 inProgress，不受影响。
+const STALE_IN_PROGRESS_REQUEST_MS = 30 * 60 * 1000;
 
 function isTextChatModelId(modelId: string): boolean {
   const normalized = modelId.trim().toLowerCase();
@@ -4705,21 +4710,27 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     // 一轮聊天/任务正在运行（尚未 request_committed）时，其它设备打开本会话也能
     // 看到"处理中"状态与用户输入，而不是看起来什么都没发生。
     let inProgress = await loadInProgressRequest(root, sessionId);
-    // 对账：transcript 里有一条"被中断、从未结束"的 request_started（服务重启 /
-    // 请求被取消遗留），但本进程并没有在跑这个会话的请求 → 改写为终态，避免
-    // 前端每次刷新都把旧指令当成"正在执行"（只在读取时惰性修复一次）。
-    if (inProgress && !activeAgentRequestSessions.has(sessionId)) {
-      await failInProgressRequest(
-        root,
-        sessionId,
-        inProgress.requestId,
-        pick(
-          await currentProjectLanguage(),
-          "任务已中断：服务在运行期间重启或请求被取消。请重新发起。",
-          "Task interrupted: the server restarted or the request was cancelled while running. Please start again.",
-        ),
-      );
-      inProgress = null;
+    // 对账：transcript 里有一条"被中断、从未结束"的 request_started。两种情况都
+    // 改写为终态，避免前端每次刷新都把旧指令当成"正在执行"：
+    // 1. 本进程并没有在跑这个会话的请求（服务重启 / 请求被取消遗留）；
+    // 2. 本进程登记着这个会话，但请求开始时间已经非常久（/agent 一直挂着没结束，
+    //    视为卡死）——云端部署常见，旧的"开写"指令每次打开都在。
+    if (inProgress) {
+      const live = activeAgentRequestSessions.has(sessionId);
+      const hung = Date.now() - inProgress.timestamp > STALE_IN_PROGRESS_REQUEST_MS;
+      if (!live || hung) {
+        await failInProgressRequest(
+          root,
+          sessionId,
+          inProgress.requestId,
+          pick(
+            await currentProjectLanguage(),
+            "任务已中断：服务在运行期间重启或请求被取消。请重新发起。",
+            "Task interrupted: the server restarted or the request was cancelled while running. Please start again.",
+          ),
+        );
+        inProgress = null;
+      }
     }
     const streaming = taskRunning || Boolean(inProgress);
     return c.json({

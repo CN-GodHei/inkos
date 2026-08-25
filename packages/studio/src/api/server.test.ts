@@ -3939,6 +3939,48 @@ describe("createStudioServer daemon lifecycle", () => {
     await pendingRequest;
   });
 
+  it("reconciles a hung request even when the server still tracks the session", async () => {
+    // 云端场景：/agent 请求一直挂着（服务端登记了该会话），但 request_started 已经
+    // 远超 30 分钟阈值 → 视为卡死，读取时对账成 request_failed，不再每次打开都显示。
+    const actual = await wireRealSessionTranscript();
+    await actual.createAndPersistBookSession(root, null, "hung-chat-session", "chat");
+    let resolveAgent!: (value: unknown) => void;
+    runAgentSessionMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAgent = resolve;
+    }));
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const pendingRequest = app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: "写一章", sessionId: "hung-chat-session", sessionKind: "chat" }),
+    });
+    await vi.waitFor(() => expect(runAgentSessionMock).toHaveBeenCalled());
+    await actual.appendTranscriptEvent(root, {
+      type: "request_started",
+      version: 1,
+      sessionId: "hung-chat-session",
+      requestId: "hung-req",
+      seq: 2,
+      timestamp: Date.now() - 31 * 60 * 1000,
+      sessionKind: "chat",
+      input: "写一章",
+    });
+
+    const response = await app.request("http://localhost/api/v1/sessions/hung-chat-session");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { streaming?: boolean; inProgress?: unknown };
+    expect(body.streaming).toBeUndefined();
+    expect(body.inProgress).toBeUndefined();
+
+    const events = await actual.readTranscriptEvents(root, "hung-chat-session");
+    expect(events.some((event) => event.type === "request_failed" && event.requestId === "hung-req")).toBe(true);
+
+    resolveAgent({ responseText: "", messages: [] });
+    await pendingRequest;
+  });
+
   it("reconciles a stale dangling request so refresh does not replay an old command", async () => {
     // 模拟：某轮请求被中断（服务重启/被取消），transcript 遗留了一条 request_started
     // 没有 request_committed 也没有 request_failed，且本进程并没有在跑该会话的请求。
