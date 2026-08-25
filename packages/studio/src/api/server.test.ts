@@ -235,6 +235,14 @@ vi.mock("@cn-godhei/inkos-core", async (importOriginal) => {
       return async () => undefined;
     }
 
+    async listBookWriteLocks(): Promise<never[]> {
+      return [];
+    }
+
+    async clearStaleBookLock(_bookId: string): Promise<{ cleared: boolean }> {
+      return { cleared: false };
+    }
+
     async getNextChapterNumber(_bookId?: string): Promise<number> {
       return 1;
     }

@@ -23,6 +23,15 @@ interface ProcessBookLock {
   heartbeatTask?: Promise<void>;
 }
 
+/** 给前端展示用的书写入锁信息（含其它进程 / CLI / TUI 留下的锁）。 */
+export interface BookWriteLockInfo {
+  readonly bookId: string;
+  readonly pid?: number;
+  readonly startedAt?: number;
+  readonly heartbeatAt?: number;
+  readonly stale: boolean;
+}
+
 // Studio creates a PipelineRunner per request. Lock ownership therefore has to
 // be shared by every StateManager in this process, not stored on one instance.
 const processBookLocks = new Map<string, ProcessBookLock>();
@@ -373,6 +382,61 @@ export class StateManager {
 
   bookDir(bookId: string): string {
     return join(this.booksDir, bookId);
+  }
+
+  /** 列出所有书目录里的活动写入锁（含 CLI/TUI 等其它进程留下的锁）。 */
+  async listBookWriteLocks(): Promise<BookWriteLockInfo[]> {
+    let entries;
+    try {
+      entries = await readdir(this.booksDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const out: BookWriteLockInfo[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const lockPath = join(this.bookDir(entry.name), ".write.lock");
+      let snapshot: Awaited<ReturnType<StateManager["readLockSnapshot"]>>;
+      try {
+        snapshot = await this.readLockSnapshot(lockPath);
+      } catch {
+        continue;
+      }
+      const metadata = snapshot.metadata;
+      if (!metadata) continue;
+      // 本进程自己持有的锁视为活动（不是 stale）。
+      const lockKey = this.normalizeLockKey(lockPath);
+      const sameProcess = processBookLocks.has(lockKey);
+      out.push({
+        bookId: entry.name,
+        ...(metadata.pid !== undefined ? { pid: metadata.pid } : {}),
+        ...(metadata.startedAt !== undefined ? { startedAt: metadata.startedAt } : {}),
+        ...(metadata.heartbeatAt !== undefined ? { heartbeatAt: metadata.heartbeatAt } : {}),
+        stale: sameProcess ? false : this.isStaleLock(metadata, snapshot.mtimeMs),
+      });
+    }
+    return out.sort((a, b) => a.bookId.localeCompare(b.bookId));
+  }
+
+  /** 清除一本书的过期写入锁；本进程仍在持有的活动锁不会被清除。 */
+  async clearStaleBookLock(bookId: string): Promise<{ cleared: boolean; stale?: boolean }> {
+    const lockPath = join(this.bookDir(bookId), ".write.lock");
+    const lockKey = this.normalizeLockKey(lockPath);
+    if (processBookLocks.has(lockKey)) {
+      return { cleared: false, stale: false };
+    }
+    try {
+      const snapshot = await this.readLockSnapshot(lockPath);
+      const stale = this.isStaleLock(snapshot.metadata, snapshot.mtimeMs);
+      if (!stale) return { cleared: false, stale: false };
+      await this.removeStaleLock(lockPath, snapshot.raw);
+      return { cleared: true, stale: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+        return { cleared: true };
+      }
+      return { cleared: false, stale: false };
+    }
   }
 
   stateDir(bookId: string): string {

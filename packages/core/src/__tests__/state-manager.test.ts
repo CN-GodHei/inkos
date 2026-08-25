@@ -1396,4 +1396,62 @@ describe("StateManager", () => {
       await expect(stat(join(storyDir, "memory.db-wal"))).rejects.toThrow();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Book write locks (running-task visibility / stale-lock clearing)
+  // -------------------------------------------------------------------------
+
+  describe("listBookWriteLocks / clearStaleBookLock", () => {
+    function writeLock(bookId: string, metadata: Record<string, unknown>): Promise<void> {
+      return writeFile(join(tempDir, "books", bookId, ".write.lock"), JSON.stringify(metadata), "utf-8");
+    }
+
+    it("lists a stale lock when the owning process is dead", async () => {
+      await mkdir(join(tempDir, "books", "demo"), { recursive: true });
+      await writeLock("demo", {
+        version: 1,
+        pid: 999999,
+        token: "t",
+        startedAt: Date.now() - 10 * 60 * 1000,
+        heartbeatAt: Date.now() - 10 * 60 * 1000,
+      });
+
+      const locks = await manager.listBookWriteLocks();
+      expect(locks).toEqual([
+        expect.objectContaining({ bookId: "demo", pid: 999999, stale: true }),
+      ]);
+    });
+
+    it("clears only a stale lock and leaves an active in-process lease alone", async () => {
+      await mkdir(join(tempDir, "books", "stale-book"), { recursive: true });
+      await writeLock("stale-book", {
+        version: 1,
+        pid: 999999,
+        token: "t",
+        startedAt: Date.now() - 10 * 60 * 1000,
+        heartbeatAt: Date.now() - 10 * 60 * 1000,
+      });
+      // 活动锁：当前进程真实持有（acquireBookLock 会登记到 processBookLocks）。
+      const release = await manager.acquireBookLock("active-book");
+
+      const locks = await manager.listBookWriteLocks();
+      expect(locks).toEqual([
+        expect.objectContaining({ bookId: "active-book", stale: false }),
+        expect.objectContaining({ bookId: "stale-book", stale: true }),
+      ]);
+      expect(await manager.clearStaleBookLock("stale-book")).toEqual({ cleared: true, stale: true });
+      // 活动锁不会被清除。
+      expect(await manager.clearStaleBookLock("active-book")).toEqual({ cleared: false, stale: false });
+
+      await release();
+      // stale 锁已清除，活动锁也已释放 → 无锁残留。
+      expect(await manager.listBookWriteLocks()).toEqual([]);
+    });
+
+    it("returns an empty list when there are no lock files", async () => {
+      expect(await manager.listBookWriteLocks()).toEqual([]);
+      // 没有锁文件 = 无需清理（幂等成功）。
+      expect(await manager.clearStaleBookLock("missing")).toEqual({ cleared: true });
+    });
+  });
 });

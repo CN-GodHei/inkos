@@ -1,11 +1,12 @@
 import { fetchJson, useApi, postApi } from "../hooks/use-api";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { useServiceStore } from "../store/service";
 import type { SSEMessage } from "../hooks/use-sse";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { deriveActiveBookIds, shouldRefetchBookCollections } from "../hooks/use-book-activity";
+import { tr } from "../lib/app-language";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   Plus,
@@ -24,6 +25,9 @@ import {
   FileInput,
   Package,
   Upload,
+  Loader2,
+  Square,
+  Lock,
 } from "lucide-react";
 
 interface BookSummary {
@@ -144,6 +148,147 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
         onConfirm={handleDelete}
         onCancel={() => setConfirmDelete(false)}
       />
+    </div>
+  );
+}
+
+function formatElapsed(startedAt: number): string {
+  const total = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;
+  return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+}
+
+interface RunningTaskItem {
+  readonly sessionId: string;
+  readonly requestedIntent: string;
+  readonly execution: {
+    readonly id: string;
+    readonly tool: string;
+    readonly label: string;
+    readonly status: string;
+    readonly startedAt: number;
+    readonly args?: { bookId?: string };
+  };
+}
+
+interface WriteLockItem {
+  readonly bookId: string;
+  readonly pid?: number;
+  readonly startedAt?: number;
+  readonly stale: boolean;
+}
+
+const RUNNING_REFRESH_EVENTS = new Set([
+  "tool:start",
+  "tool:end",
+  "task:snapshot",
+  "agent:complete",
+  "agent:error",
+  "write:start",
+  "write:complete",
+  "write:error",
+  "daemon:started",
+  "daemon:stopped",
+]);
+
+/** 除聊天对话框之外，集中查看/停止正在运行的任务、清除过期书写入锁。 */
+function RunningTasksSection({ sse }: { sse: { messages: ReadonlyArray<SSEMessage> } }) {
+  const [data, setData] = useState<{ tasks: RunningTaskItem[]; locks: WriteLockItem[] }>({ tasks: [], locks: [] });
+
+  const refresh = useCallback(async () => {
+    try {
+      const json = await fetchJson<{ tasks: RunningTaskItem[]; locks: WriteLockItem[] }>("/tasks/active");
+      setData(json);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refresh(), 10000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  useEffect(() => {
+    const last = sse.messages.at(-1);
+    if (!last || !RUNNING_REFRESH_EVENTS.has(last.event)) return;
+    void refresh();
+  }, [refresh, sse.messages]);
+
+  const stopTask = async (sessionId: string) => {
+    try {
+      await postApi(`/sessions/${sessionId}/abort`);
+    } catch {
+      // ignore
+    }
+    void refresh();
+  };
+
+  const clearLock = async (bookId: string) => {
+    try {
+      await postApi(`/books/${bookId}/write-lock/clear`);
+    } catch {
+      // ignore
+    }
+    void refresh();
+  };
+
+  if (data.tasks.length === 0 && data.locks.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-primary/20 bg-primary/5 p-5 space-y-3 fade-in">
+      <div className="flex items-center gap-2">
+        <Loader2 size={16} className="animate-spin text-primary" />
+        <span className="text-sm font-semibold text-foreground">{tr("正在运行的任务", "Running tasks")}</span>
+      </div>
+      {data.tasks.map((task) => (
+        <div key={task.execution.id} className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-card/70 px-4 py-2.5">
+          <div className="flex items-center gap-3 min-w-0">
+            <Loader2 size={14} className="animate-spin text-primary shrink-0" />
+            <div className="min-w-0">
+              <div className="text-sm font-medium truncate text-foreground">
+                {task.execution.label}{task.execution.args?.bookId ? ` · ${task.execution.args.bookId}` : ""}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {formatElapsed(task.execution.startedAt)} · {task.execution.status}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() => void stopTask(task.sessionId)}
+            className="shrink-0 flex items-center gap-1.5 rounded-lg border border-border/60 bg-background/80 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Square size={11} />
+            {tr("停止", "Stop")}
+          </button>
+        </div>
+      ))}
+      {data.locks.map((lock) => (
+        <div key={lock.bookId} className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-card/70 px-4 py-2.5">
+          <div className="flex items-center gap-3 min-w-0">
+            {lock.stale ? <Lock size={14} className="text-amber-500 shrink-0" /> : <Loader2 size={14} className="animate-spin text-primary shrink-0" />}
+            <div className="min-w-0">
+              <div className="text-sm font-medium truncate text-foreground">{lock.bookId}</div>
+              <div className="text-xs text-muted-foreground">
+                {tr("书写入锁", "write lock")}
+                {lock.pid ? ` · pid:${lock.pid}` : ""}
+                {lock.startedAt ? ` · ${formatElapsed(lock.startedAt)}` : ""}
+                {lock.stale ? ` · ${tr("已过期", "stale")}` : ""}
+              </div>
+            </div>
+          </div>
+          {lock.stale && (
+            <button
+              onClick={() => void clearLock(lock.bookId)}
+              className="shrink-0 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 transition-colors"
+            >
+              {tr("清除旧锁", "Clear stale lock")}
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -336,6 +481,8 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           </button>
         </div>
       </div>
+
+      <RunningTasksSection sse={sse} />
 
       <div className="grid gap-6">
         {data.books.map((book, index) => {

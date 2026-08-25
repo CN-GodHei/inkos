@@ -3401,6 +3401,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
 
   // --- Actions ---
 
+  // 清除一本书的过期写入锁（进程已退出 / 心跳超时的旧锁）。活动锁不会被清除。
+  app.post("/api/v1/books/:id/write-lock/clear", async (c) => {
+    const bookId = normalizeApiBookId(c.req.param("id"), "id");
+    if (!bookId) throw new ApiError(400, "INVALID_BOOK_ID", "Invalid book id");
+    const result = await state.clearStaleBookLock(bookId);
+    return c.json(result);
+  });
+
   app.post("/api/v1/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json<{ wordCount?: number; chapterCount?: number }>()
@@ -4694,11 +4702,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     return c.json({ sessions });
   });
 
-  // 运行中的后台生产任务快照列表：任何客户端加载时调用，用于恢复/展示别的端
-  // 发起、仍在本进程运行的任务（页面刷新、PC 与移动端之间状态同步）。
+  // 运行中的后台生产任务快照列表 + 各书的写入锁：任何客户端加载时调用，用于
+  // 恢复/展示别的端发起、仍在本进程运行的任务（页面刷新、PC 与移动端之间状态
+  // 同步），以及查看/清理被占用的书写入锁。
   app.get("/api/v1/tasks/active", async (c) => {
     const tasks = await listActiveRunningTaskSnapshots();
-    return c.json({ tasks });
+    const locks = await state.listBookWriteLocks();
+    return c.json({ tasks, locks });
   });
 
   app.get("/api/v1/sessions/:sessionId", async (c) => {
