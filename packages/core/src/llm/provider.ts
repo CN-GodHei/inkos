@@ -23,6 +23,10 @@ import {
   agentTrajectoryHeaders,
   beginAgentModelCall,
 } from "./agent-trajectory.js";
+import {
+  createOpenCodeSessionId,
+  withOpenCodeSessionHeader,
+} from "./opencode-session.js";
 
 
 // === Streaming Monitor Types ===
@@ -278,6 +282,11 @@ export interface LLMClient {
   readonly apiFormat: "chat" | "responses";
   readonly stream: boolean;
   readonly proxyUrl?: string;
+  /**
+   * 会话标识：OpenCode 端点用它填 `x-opencode-session`。
+   * 每次 createLLMClient 生成一个，同一个 client 内保持稳定。
+   */
+  readonly sessionId?: string;
   readonly _piModel?: PiModel<PiApi>;
   readonly _apiKey?: string;
   readonly defaults: {
@@ -364,6 +373,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     apiFormat,
     stream,
     proxyUrl: config.proxyUrl,
+    sessionId: createOpenCodeSessionId(),
     _piModel: piModel,
     _apiKey: config.apiKey,
     defaults,
@@ -837,12 +847,18 @@ function shouldUseNativeLocalOpenAICompatibleTransport(client: LLMClient): boole
 
 function buildCustomHeaders(client: LLMClient, traceHeaders: Record<string, string>): Record<string, string> {
   const apiKey = sanitizeHeaderApiKey(client._apiKey);
-  return sanitizeHttpHeaders({
-    "Content-Type": "application/json",
-    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    ...(client._piModel?.headers ?? {}),
-    ...traceHeaders,
-  }) ?? { "Content-Type": "application/json" };
+  return sanitizeHttpHeaders(
+    withOpenCodeSessionHeader({
+      "Content-Type": "application/json",
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      ...(client._piModel?.headers ?? {}),
+      ...traceHeaders,
+    }, {
+      service: client.service,
+      baseUrl: client._piModel?.baseUrl,
+      sessionId: client.sessionId,
+    }),
+  ) ?? { "Content-Type": "application/json" };
 }
 
 function defaultOpenAIChatExtra(client: LLMClient, model: string): Record<string, unknown> {
@@ -1060,15 +1076,21 @@ async function chatCompletionViaCustomAnthropicCompatible(
   const apiKey = sanitizeHeaderApiKey(client._apiKey);
   const response = await fetchWithProxy(`${baseUrl.replace(/\/$/, "")}/messages`, {
     method: "POST",
-    headers: sanitizeHttpHeaders({
-      "User-Agent": INKOS_USER_AGENT,
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-      ...(client._piModel?.headers ?? {}),
-      ...traceHeaders,
-    }) ?? { "Content-Type": "application/json" },
+    headers: sanitizeHttpHeaders(
+      withOpenCodeSessionHeader({
+        "User-Agent": INKOS_USER_AGENT,
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...(client._piModel?.headers ?? {}),
+        ...traceHeaders,
+      }, {
+        service: client.service,
+        baseUrl,
+        sessionId: client.sessionId,
+      }),
+    ) ?? { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     signal,
   }, client.proxyUrl);
@@ -1597,7 +1619,16 @@ async function chatCompletionViaPiAi(
     temperature: resolved.temperature,
     maxTokens: resolved.maxTokens,
     apiKey: client._apiKey,
-    headers: mergeUserAgent({ ...(piModel.headers ?? {}), ...traceHeaders }),
+    headers: mergeUserAgent(
+      withOpenCodeSessionHeader(
+        { ...(piModel.headers ?? {}), ...traceHeaders },
+        {
+          service: client.service,
+          baseUrl: piModel.baseUrl,
+          sessionId: client.sessionId,
+        },
+      ),
+    ),
     signal,
   };
 

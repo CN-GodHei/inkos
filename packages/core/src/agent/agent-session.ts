@@ -1208,7 +1208,7 @@ async function runAgentSessionUnlocked(
           return localAssistantStopStream(streamModel);
         }
         if (isLlmStubEnabled()) return stubAgentStream(streamModel, context);
-        return guardedPiStream(streamModel, context, options);
+        return guardedPiStream(streamModel, context, options, sessionId);
       },
       getApiKey: (provider: string) => {
         if (config.apiKey) return config.apiKey;

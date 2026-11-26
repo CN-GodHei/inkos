@@ -347,7 +347,7 @@ export async function runWorkerAgentTool<TParameters extends TSchema>(
           ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
           ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
           signal: combineSignals(streamOptions?.signal, options.signal),
-        }),
+        }, client.sessionId),
     getApiKey: () => client._apiKey,
   });
   const abortAgent = () => agent.abort();
