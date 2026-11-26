@@ -1,2 +1,16 @@
 packages:
   - "packages/*"
+
+# pnpm 11+ no longer reads the "pnpm" field of package.json, so build-script
+# approvals and overrides must be declared here as well. Values under
+# allowBuilds must be booleans: pnpm writes "set this to true or false" as a
+# placeholder, and a placeholder does NOT enable the build scripts.
+allowBuilds:
+  esbuild: true
+  msw: true
+  protobufjs: true
+
+# Keep in sync with "pnpm.overrides" in package.json (pnpm 9, used by CI).
+overrides:
+  "@mariozechner/pi-ai": 0.67.1
+  "@mariozechner/pi-agent-core": 0.67.1
